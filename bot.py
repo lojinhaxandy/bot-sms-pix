@@ -145,13 +145,21 @@ def processar_compra(message):
 
 @app.route(f"/{API_TOKEN}", methods=["POST"])
 def telegram_webhook():
-    update = request.get_data().decode("utf-8")
-    update = telebot.types.Update.de_json(update)
-    bot.process_new_updates([update])
+    try:
+        update = telebot.types.Update.de_json(request.get_data().decode("utf-8"))
+        bot.process_new_updates([update])
+    except Exception as e:
+        print(f"Erro processando update: {e}")
     return "OK", 200
 
 if __name__ == "__main__":
-    bot.remove_webhook()
-    bot.set_webhook(url='https://bot-sms-pix.onrender.com/' + API_TOKEN)
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    modo = os.environ.get("BOT_MODE", "polling")  # define pelo Render (webhook) ou local (polling)
+    if modo == "webhook":
+        bot.remove_webhook()
+        bot.set_webhook(url='https://bot-sms-pix.onrender.com/' + API_TOKEN)
+        port = int(os.environ.get("PORT", 5000))
+        app.run(host="0.0.0.0", port=port)
+    else:
+        print("Rodando em modo polling (local/teste)")
+        bot.remove_webhook()
+        bot.polling()

@@ -2,242 +2,269 @@ import os
 import time
 import threading
 import requests
-from flask import Flask, request, abort
+from flask import Flask, request
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# ==========================
-# Configurações iniciais
-# ==========================
-TOKEN = "7571534692:AAHLebRcTLA0x0XoDRXqKHpFev3tcePBC84"  # Seu token Telegram
-WEBHOOK_URL_BASE = "https://bot-sms-pix.onrender.com"    # Sua URL Render
-WEBHOOK_URL_PATH = f"/{TOKEN}"
+# === CONFIGURAÇÕES ===
 
-SMSBOWER_API_KEY = "6lkWWVDjjTSCpfMGLtQZvD0Uwd1LQk5G"    # API SMSBOWER
+API_TOKEN = "7571534692:AAHLebRcTLA0x0XoDRXqKHpFev3tcePBC84"
+WEBHOOK_URL_BASE = "https://bot-sms-pix.onrender.com"
+WEBHOOK_URL_PATH = f"/{API_TOKEN}/"
 
-# Serviços disponíveis e preço (R$)
+SMSBOWER_API_KEY = "6lkWWVDjjTSCpfMGLtQZvD0Uwd1LQk5G"
+MERCADOPAGO_ACCESS_TOKEN = "APP_USR-1661690156955161-061015-1277fc50c082df9755ad4a4f043449c3-1294489094"
+
+# Serviços disponíveis, preço por unidade em reais
 SERVICOS = {
-    "china": {"nome": "Verificar Telefone na China", "preco": 0.25, "smsbower_service": "picpaychina"},
-    "mercadopago": {"nome": "Mercado Pago", "preco": 0.25, "smsbower_service": "mercadopago"},
-    "picpay": {"nome": "PicPay", "preco": 0.25, "smsbower_service": "picpay"},
-    "nubank": {"nome": "Nubank", "preco": 0.25, "smsbower_service": "nubank"},
-    "astropay": {"nome": "Astropay", "preco": 0.25, "smsbower_service": "astropay"},
+    "china": {"nome": "Verificar Telefone Na China", "codigo": "picpaychina", "preco": 0.25},
+    "mercadopago": {"nome": "Mercado Pago", "codigo": "mercadopago", "preco": 0.25},
+    "picpay": {"nome": "PicPay", "codigo": "picpay", "preco": 0.25},
+    "nubank": {"nome": "Nubank", "codigo": "nubank", "preco": 0.25},
+    "astropay": {"nome": "AstroPay", "codigo": "astropay", "preco": 0.25},
 }
 
-# Tempo de expiração do número em segundos (18 minutos)
+# Timeout para expiração do número em segundos (18 minutos)
 EXPIRACAO_NUMERO = 18 * 60
 
-# ==========================
-# Variáveis globais (exemplo simples)
-# ==========================
-user_saldos = {}  # chat_id -> saldo (float)
-user_numeros = {} # chat_id -> {"numero": ..., "activationId": ..., "servico": ..., "timestamp": ...}
-
-# ==========================
-# Inicializa bot e Flask
-# ==========================
-bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
+bot = telebot.TeleBot(API_TOKEN)
 
-# ==========================
-# Funções auxiliares
-# ==========================
-def get_saldo(chat_id):
-    return user_saldos.get(chat_id, 0.0)
+# Base de dados simples em memória (troque por banco real depois)
+usuarios = {}  
+# Exemplo:
+# usuarios = {
+#   chat_id: {
+#       "saldo": float,
+#       "ativacao": {
+#           "activation_id": str,
+#           "numero": str,
+#           "servico": str,
+#           "inicio": timestamp
+#       }
+#   }
+# }
 
-def add_saldo(chat_id, valor):
-    saldo = get_saldo(chat_id)
-    saldo += valor
-    user_saldos[chat_id] = saldo
+# ==================== FUNÇÕES AUXILIARES ====================
+
+def criar_cobranca(valor, chat_id):
+    """Cria uma cobrança no Mercado Pago e retorna o link de pagamento"""
+    headers = {
+        "Authorization": f"Bearer {MERCADOPAGO_ACCESS_TOKEN}",
+        "Content-Type": "application/json",
+        "X-Idempotency-Key": str(time.time())  # evita duplicidade
+    }
+    data = {
+        "transaction_amount": float(valor),
+        "description": f"Recarga bot SMS - Usuário {chat_id}",
+        "payment_method_id": "pix",
+        "payer": {
+            "email": f"user{chat_id}@bot.com"
+        }
+    }
+    response = requests.post("https://api.mercadopago.com/v1/payments", json=data, headers=headers)
+    if response.status_code == 201 or response.status_code == 200:
+        resp_json = response.json()
+        # Link QRCode pix
+        pix_link = resp_json.get("point_of_interaction", {}).get("transaction_data", {}).get("qr_code")
+        return pix_link
+    else:
+        print("Erro Mercado Pago:", response.text)
+        return None
+
+def comprar_numero(servico_codigo):
+    """Compra número no SMSBower para o serviço"""
+    url = (
+        f"https://smsbower.online/stubs/handler_api.php?api_key={SMSBOWER_API_KEY}"
+        f"&action=getNumber&service={servico_codigo}&country=br&maxPrice=10"
+    )
+    r = requests.get(url)
+    if r.ok and r.text.startswith("ACCESS_NUMBER"):
+        parts = r.text.split(":")
+        activation_id = parts[1]
+        numero = parts[2]
+        return activation_id, numero
+    else:
+        print("Erro comprar número:", r.text)
+        return None, None
+
+def consultar_sms(activation_id):
+    """Consulta SMS recebido para o activation_id"""
+    url = f"https://smsbower.online/stubs/handler_api.php?api_key={SMSBOWER_API_KEY}&action=getStatus&id={activation_id}"
+    r = requests.get(url)
+    if r.ok:
+        return r.text
+    else:
+        return None
+
+def cancelar_numero(activation_id):
+    """Cancela a ativação no SMSBower"""
+    url = f"https://smsbower.online/stubs/handler_api.php?api_key={SMSBOWER_API_KEY}&action=cancelActivation&id={activation_id}"
+    r = requests.get(url)
+    return r.ok
 
 def descontar_saldo(chat_id, valor):
-    saldo = get_saldo(chat_id)
-    if saldo >= valor:
-        user_saldos[chat_id] = saldo - valor
+    if chat_id not in usuarios:
+        usuarios[chat_id] = {"saldo": 0.0, "ativacao": None}
+    if usuarios[chat_id]["saldo"] >= valor:
+        usuarios[chat_id]["saldo"] -= valor
         return True
-    else:
-        return False
+    return False
 
-def compra_numero_sms(servico):
-    """Chama API do smsbower para comprar número do serviço."""
-    params = {
-        "api_key": SMSBOWER_API_KEY,
-        "action": "getNumber",
-        "service": servico,
-        "country": "cn",      # Exemplo fixo China, pode alterar
-        "maxPrice": "10",     # Limite max preço
-    }
-    try:
-        r = requests.get("https://smsbower.online/stubs/handler_api.php", params=params)
-        if r.status_code == 200:
-            text = r.text.strip()
-            # Retorno esperado: ACCESS_NUMBER:activationId:phoneNumber
-            if text.startswith("ACCESS_NUMBER"):
-                parts = text.split(":")
-                activationId = parts[1]
-                phoneNumber = parts[2]
-                return activationId, phoneNumber
-            else:
-                return None, text  # Retorna erro da API
-        else:
-            return None, f"Erro HTTP {r.status_code}"
-    except Exception as e:
-        return None, str(e)
+def saldo_usuario(chat_id):
+    return usuarios.get(chat_id, {}).get("saldo", 0.0)
 
-def consulta_sms(activationId):
-    """Consulta SMS recebido pela API do smsbower."""
-    params = {
-        "api_key": SMSBOWER_API_KEY,
-        "action": "getStatus",
-        "id": activationId
-    }
-    try:
-        r = requests.get("https://smsbower.online/stubs/handler_api.php", params=params)
-        if r.status_code == 200:
-            text = r.text.strip()
-            # Pode ser STATUS_CANCEL ou STATUS_OK:message ou STATUS_WAIT_CODE
-            return text
-        else:
-            return f"Erro HTTP {r.status_code}"
-    except Exception as e:
-        return str(e)
+# ==================== HANDLERS ====================
 
-# ==========================
-# Comandos do bot
-# ==========================
-
-@bot.message_handler(commands=["start", "help"])
-def send_welcome(message):
+@bot.message_handler(commands=["start"])
+def start(message):
     chat_id = message.chat.id
-    texto = (
-        "🤖 Bem-vindo ao Bot SMS com saldo!\n\n"
-        "Você pode recarregar saldo e comprar números SMS para serviços.\n\n"
-        "Use /saldo para ver seu saldo.\n"
-        "Use /recarregar para adicionar saldo.\n"
-        "Use /comprar para escolher um serviço e comprar número SMS.\n"
-    )
-    bot.send_message(chat_id, texto)
+    if chat_id not in usuarios:
+        usuarios[chat_id] = {"saldo": 0.0, "ativacao": None}
+    bot.send_message(chat_id, "Bem-vindo! Seu saldo atual é R$ %.2f\nEnvie o valor para recarregar (ex: 2.50)" % saldo_usuario(chat_id))
 
 @bot.message_handler(commands=["saldo"])
-def mostrar_saldo(message):
+def mostra_saldo(message):
     chat_id = message.chat.id
-    saldo = get_saldo(chat_id)
-    bot.send_message(chat_id, f"Seu saldo atual é: R$ {saldo:.2f}")
+    bot.send_message(chat_id, f"Seu saldo atual é R$ {saldo_usuario(chat_id):.2f}")
 
-@bot.message_handler(commands=["recarregar"])
-def recarregar_saldo(message):
-    chat_id = message.chat.id
-    bot.send_message(chat_id, "💸 Envie o valor que deseja recarregar (ex: 2.50)")
-
-    # Próxima mensagem do usuário será o valor, vamos usar next_step_handler
-    bot.register_next_step_handler(message, processar_recarregar)
-
-def processar_recarregar(message):
+@bot.message_handler(func=lambda m: m.text and m.text.replace('.', '', 1).isdigit())
+def recarregar(message):
     chat_id = message.chat.id
     try:
-        valor = float(message.text.replace(",", "."))
-        if valor <= 0:
-            bot.send_message(chat_id, "Valor inválido. Envie um número positivo.")
+        valor = float(message.text)
+        if valor < 0.25:
+            bot.send_message(chat_id, "O valor mínimo para recarga é R$ 0,25")
             return
     except:
-        bot.send_message(chat_id, "Valor inválido. Envie um número válido como 2.50")
+        bot.send_message(chat_id, "Valor inválido.")
         return
 
-    # Aqui você integraria Mercado Pago para gerar cobrança e confirmar
-    # Para demo vamos adicionar direto (assumindo pagamento OK)
-    add_saldo(chat_id, valor)
-    bot.send_message(chat_id, f"✅ Saldo recarregado em R$ {valor:.2f} com sucesso!\nSeu saldo atual: R$ {get_saldo(chat_id):.2f}")
+    link = criar_cobranca(valor, chat_id)
+    if link:
+        bot.send_message(chat_id, f"Para recarregar R$ {valor:.2f}, faça o pagamento via PIX neste link:\n{link}\nApós o pagamento, seu saldo será atualizado em alguns minutos.")
+    else:
+        bot.send_message(chat_id, "❌ Erro ao gerar cobrança. Tente novamente.")
 
-@bot.message_handler(commands=["comprar"])
-def escolher_servico(message):
+# Botão para escolher serviço
+@bot.message_handler(commands=["servicos"])
+def mostrar_servicos(message):
     chat_id = message.chat.id
-
     markup = InlineKeyboardMarkup(row_width=2)
-    botoes = []
-    for key, info in SERVICOS.items():
-        botoes.append(InlineKeyboardButton(text=f"{info['nome']} - R$ {info['preco']:.2f}", callback_data=f"comprar_{key}"))
-    markup.add(*botoes)
+    for key, svc in SERVICOS.items():
+        markup.add(InlineKeyboardButton(svc["nome"], callback_data=f"servico_{key}"))
+    bot.send_message(chat_id, "Escolha o serviço desejado:", reply_markup=markup)
 
-    bot.send_message(chat_id, "Escolha o serviço para comprar número SMS:", reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("comprar_"))
-def comprar_numero_callback(call):
+@bot.callback_query_handler(func=lambda call: call.data.startswith("servico_"))
+def servico_selecionado(call):
     chat_id = call.message.chat.id
-    servico_key = call.data[len("comprar_"):]
-    if servico_key not in SERVICOS:
+    servico_key = call.data.split("_")[1]
+    servico = SERVICOS.get(servico_key)
+
+    if not servico:
         bot.answer_callback_query(call.id, "Serviço inválido.")
         return
-    info = SERVICOS[servico_key]
 
-    # Verifica saldo
-    if get_saldo(chat_id) < info['preco']:
-        bot.answer_callback_query(call.id, "Saldo insuficiente. Recarregue com /recarregar")
+    preco = servico["preco"]
+    saldo = saldo_usuario(chat_id)
+
+    if saldo < preco:
+        bot.answer_callback_query(call.id, "Saldo insuficiente. Recarregue antes.")
         return
 
-    bot.answer_callback_query(call.id, "Comprando número... aguarde.")
-    # Compra número
-    activationId, resp = compra_numero_sms(info['smsbower_service'])
-    if activationId:
-        descontar_saldo(chat_id, info['preco'])
-        user_numeros[chat_id] = {
-            "numero": resp,
-            "activationId": activationId,
-            "servico": servico_key,
-            "timestamp": time.time()
-        }
-        bot.send_message(chat_id, f"✅ Número comprado: {resp}\nAguarde o SMS de confirmação.")
-        # Começar thread para monitorar SMS
-        threading.Thread(target=monitorar_sms, args=(chat_id,), daemon=True).start()
+    # Compra número SMS
+    activation_id, numero = comprar_numero(servico["codigo"])
+    if not activation_id:
+        bot.answer_callback_query(call.id, "❌ Erro ao comprar número. Tente novamente.")
+        return
+
+    # Desconta saldo
+    if not descontar_saldo(chat_id, preco):
+        bot.answer_callback_query(call.id, "Saldo insuficiente para compra.")
+        return
+
+    # Armazena ativação
+    usuarios[chat_id]["ativacao"] = {
+        "activation_id": activation_id,
+        "numero": numero,
+        "servico": servico_key,
+        "inicio": time.time()
+    }
+
+    # Monta teclado com opções para o número comprado
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton("Novo SMS", callback_data="novo_sms"),
+        InlineKeyboardButton("Cancelar Número", callback_data="cancelar_numero")
+    )
+
+    bot.edit_message_text(
+        f"Número comprado: {numero}\nServiço: {servico['nome']}\nSaldo descontado: R$ {preco:.2f}",
+        chat_id=chat_id,
+        message_id=call.message.message_id,
+        reply_markup=markup
+    )
+    bot.answer_callback_query(call.id)
+
+def checar_expiracao(chat_id):
+    ativ = usuarios.get(chat_id, {}).get("ativacao")
+    if ativ and time.time() - ativ["inicio"] > EXPIRACAO_NUMERO:
+        cancelar_numero(ativ["activation_id"])
+        usuarios[chat_id]["ativacao"] = None
+        bot.send_message(chat_id, "⏰ O número expirou e foi cancelado automaticamente.")
+
+@bot.callback_query_handler(func=lambda call: call.data == "cancelar_numero")
+def cancelar_numero_cb(call):
+    chat_id = call.message.chat.id
+    ativ = usuarios.get(chat_id, {}).get("ativacao")
+    if not ativ:
+        bot.answer_callback_query(call.id, "Você não tem número ativo.")
+        return
+    cancelar_numero(ativ["activation_id"])
+    usuarios[chat_id]["ativacao"] = None
+    bot.edit_message_text("Número cancelado com sucesso.", chat_id=chat_id, message_id=call.message.message_id)
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "novo_sms")
+def novo_sms_cb(call):
+    chat_id = call.message.chat.id
+    ativ = usuarios.get(chat_id, {}).get("ativacao")
+    if not ativ:
+        bot.answer_callback_query(call.id, "Você não tem número ativo.")
+        return
+
+    checar_expiracao(chat_id)
+
+    ativ = usuarios.get(chat_id, {}).get("ativacao")
+    if not ativ:
+        bot.answer_callback_query(call.id, "Seu número expirou. Compre outro serviço.")
+        return
+
+    sms = consultar_sms(ativ["activation_id"])
+    if sms == "STATUS_WAIT_CODE":
+        bot.answer_callback_query(call.id, "⌛ Aguardando SMS...")
+    elif sms and sms != "STATUS_WAIT_CODE":
+        bot.edit_message_text(f"SMS recebido:\n{sms}", chat_id=chat_id, message_id=call.message.message_id)
+        # Considera finalizada ativação e remove
+        usuarios[chat_id]["ativacao"] = None
     else:
-        bot.send_message(chat_id, f"❌ Erro ao comprar número: {resp}")
+        bot.answer_callback_query(call.id, "Erro ao consultar SMS. Tente novamente.")
 
-def monitorar_sms(chat_id):
-    # Espera e verifica SMS até 18 minutos
-    start = time.time()
-    while True:
-        if chat_id not in user_numeros:
-            break
-        data = user_numeros[chat_id]
-        if time.time() - data["timestamp"] > EXPIRACAO_NUMERO:
-            bot.send_message(chat_id, "⏳ Tempo para receber SMS expirou. Número cancelado.")
-            user_numeros.pop(chat_id, None)
-            break
-        resultado = consulta_sms(data["activationId"])
-        if resultado.startswith("STATUS_OK:"):
-            codigo = resultado.split("STATUS_OK:")[1]
-            bot.send_message(chat_id, f"📩 SMS recebido: {codigo}")
-            user_numeros.pop(chat_id, None)
-            break
-        elif resultado == "STATUS_CANCEL":
-            bot.send_message(chat_id, "❌ Número foi cancelado pelo provedor.")
-            user_numeros.pop(chat_id, None)
-            break
-        time.sleep(15)  # aguarda 15 seg antes de checar de novo
+# ==================== FLASK E WEBHOOK ====================
 
-# ==========================
-# Webhook Flask Routes
-# ==========================
-@app.route(WEBHOOK_URL_PATH, methods=['POST'])
+@app.route(WEBHOOK_URL_PATH, methods=["POST"])
 def webhook():
-    if request.headers.get('content-type') == 'application/json':
-        json_string = request.get_data().decode('utf-8')
-        update = telebot.types.Update.de_json(json_string)
-        bot.process_new_updates([update])
-        return '', 200
-    else:
-        abort(403)
+    json_str = request.get_data().decode("utf-8")
+    update = telebot.types.Update.de_json(json_str)
+    bot.process_new_updates([update])
+    return "", 200
 
-@app.before_first_request
-def setup_webhook():
+if __name__ == "__main__":
     webhook_url = WEBHOOK_URL_BASE + WEBHOOK_URL_PATH
     if bot.set_webhook(url=webhook_url):
-        print(f"Webhook configurado: {webhook_url}")
+        print(f"Webhook configurado em: {webhook_url}")
     else:
         print("Falha ao configurar webhook")
 
-# ==========================
-# Run app
-# ==========================
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)

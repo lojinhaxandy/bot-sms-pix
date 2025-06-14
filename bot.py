@@ -1,6 +1,7 @@
 import telebot
 import os
 import requests
+import uuid
 from flask import Flask, request
 
 API_TOKEN = "7571534692:AAHLebRcTLA0x0XoDRXqKHpFev3tcePBC84"
@@ -45,10 +46,13 @@ def gerar_pix(message):
         valor = float(message.text.replace(",", "."))
         user_id = message.from_user.id
 
+        idempotency_key = str(uuid.uuid4())  # Gera chave única para o header
+
         url = "https://api.mercadopago.com/v1/payments"
         headers = {
             "Authorization": f"Bearer {MERCADO_PAGO_TOKEN}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "X-Idempotency-Key": idempotency_key
         }
         payload = {
             "transaction_amount": valor,

@@ -4,13 +4,13 @@ import requests
 from flask import Flask, request
 
 API_TOKEN = "7571534692:AAHLebRcTLA0x0XoDRXqKHpFev3tcePBC84"
-MERCADO_PAGO_TOKEN = 'APP_USR-1661690156955161-061015-1277fc50c082df9755ad4a4f043449c3-1294489094'
+MERCADO_PAGO_TOKEN = "APP_USR-1661690156955161-061015-1277fc50c082df9755ad4a4f043449c3-1294489094"
 
 bot = telebot.TeleBot(API_TOKEN)
 app = Flask(__name__)
 
 usuarios = {}
-cobrancas = {}  # Armazena id de pagamento por user_id
+cobrancas = {}
 
 # --- Comando /start
 @bot.message_handler(commands=['start'])
@@ -64,18 +64,16 @@ def gerar_pix(message):
     except:
         bot.send_message(message.chat.id, "❗ Valor inválido. Tente novamente com um número (ex: 5.00).")
 
-# --- Webhook Mercado Pago para detectar pagamento
+# --- Webhook Mercado Pago
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.json
-
     if data and "type" in data and data["type"] == "payment":
         payment_id = int(data["data"]["id"])
         verificar_pagamento(payment_id)
-
     return "OK", 200
 
-# --- Verificar pagamento pelo ID
+# --- Verifica pagamento
 def verificar_pagamento(payment_id):
     url = f"https://api.mercadopago.com/v1/payments/{payment_id}"
     headers = {
@@ -91,9 +89,17 @@ def verificar_pagamento(payment_id):
             bot.send_message(user_id, f"✅ Pagamento de R$ {valor:.2f} aprovado! Seu novo saldo é R$ {usuarios[user_id]:.2f}")
             del cobrancas[payment_id]
 
-@app.route("/", methods=["GET"])
-def home():
-    return "Bot online!", 200
+# --- Webhook do Telegram
+@app.route(f"/{API_TOKEN}", methods=["POST"])
+def telegram_webhook():
+    update = request.get_data().decode("utf-8")
+    update = telebot.types.Update.de_json(update)
+    bot.process_new_updates([update])
+    return "OK", 200
 
+# --- Inicializa Flask no Render
 if __name__ == "__main__":
-    bot.infinity_polling()
+    bot.remove_webhook()
+    bot.set_webhook(url='https://bot-sms-pix.onrender.com/' + API_TOKEN)  # ⬅️ ALTERE AQUI com sua URL do Render
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)

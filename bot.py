@@ -67,9 +67,10 @@ def gerar_pix(message):
             bot.send_message(user_id, f"✅ Pague com Pix:\n\n🔢 Copia e Cola:\n`{pix_code}`", parse_mode="Markdown")
             bot.send_message(user_id, "📌 Após o pagamento, o saldo será atualizado automaticamente.")
         else:
-            bot.send_message(user_id, "❌ Erro ao gerar cobrança. Tente novamente.")
-    except:
-        bot.send_message(message.chat.id, "❗ Valor inválido. Tente novamente com um número (ex: 5.00).")
+            erro_msg = r.get('message') or str(r)
+            bot.send_message(user_id, f"❌ Erro ao gerar cobrança: {erro_msg}")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❗ Valor inválido ou erro interno: {str(e)}")
 
 @app.route("/webhook", methods=["POST"])
 def webhook():

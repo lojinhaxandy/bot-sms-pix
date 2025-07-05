@@ -278,7 +278,7 @@ def cb_comprar(c):
             except: pass
 
     # auto-cancel
-     def auto_cancel():
+    def auto_cancel():
         time.sleep(PRAZO_SEGUNDOS)
         with status_lock:
             info = status_map.get(aid)

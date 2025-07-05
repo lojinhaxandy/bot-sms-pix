@@ -8,6 +8,7 @@ import telebot
 import mercadopago
 from datetime import datetime
 from flask import Flask, request, jsonify
+from telebot.apihelper import ApiTelegramException
 
 # === CONFIG from environment ===
 BOT_TOKEN             = os.getenv('BOT_TOKEN', '8086140451:AAFKRaaiF3yiFCxcmgzA0UhP_XGpOoXTx0c')
@@ -17,7 +18,7 @@ SMSBOWER_API_KEY      = os.getenv('SMSBOWER_API_KEY', '6lkWWVDjjTSCpfMGLtQZvD0Uw
 SMSBOWER_URL          = 'https://smsbower.online/stubs/handler_api.php'
 COUNTRY_ID            = os.getenv('COUNTRY_ID', '73')
 MP_ACCESS_TOKEN       = os.getenv('MP_ACCESS_TOKEN', 'APP_USR-1661690156955161-061015-1277fc50c082df9755ad4a4f043449c3-1294489094')
-TELEGRAM_WEBHOOK_URL  = os.getenv('TELEGRAM_WEBHOOK_URL')   # e.g. "https://<your-app>.onrender.com"
+TELEGRAM_WEBHOOK_URL  = os.getenv('TELEGRAM_WEBHOOK_URL', 'https://bot-sms-pix.onrender.com')
 MP_WEBHOOK_PATH       = os.getenv('MP_WEBHOOK_PATH', '/mp_webhook')
 USERS_FILE            = 'usuarios.json'
 PRAZO_MINUTOS         = 23
@@ -220,6 +221,12 @@ def mp_webhook():
     return jsonify({'status':'ok'})
 
 # === TELEGRAM HANDLERS (webhook mode) ===
+def safe_answer_callback(callback_query_id, text=None, show_alert=False):
+    try:
+        bot.answer_callback_query(callback_query_id, text=text, show_alert=show_alert)
+    except ApiTelegramException as e:
+        logger.warning(f"Could not answer callback query: {e}")
+
 def send_menu(chat_id):
     kb = telebot.types.InlineKeyboardMarkup(row_width=1)
     kb.add(
@@ -243,7 +250,7 @@ def default_menu(m):
 
 @bot.callback_query_handler(lambda c: c.data == 'menu_saldo')
 def h_saldo(c):
-    bot.answer_callback_query(c.id)
+    safe_answer_callback(c.id)
     criar_usuario(c.from_user.id)
     saldo = carregar_usuarios()[str(c.from_user.id)]['saldo']
     bot.send_message(c.message.chat.id, f"💰 Saldo: R$ {saldo:.2f}")
@@ -251,14 +258,13 @@ def h_saldo(c):
 
 @bot.callback_query_handler(lambda c: c.data == 'menu_recarregar')
 def h_recarregar(c):
-    bot.answer_callback_query(c.id)
-    msg = bot.send_message(c.message.chat.id,
-                           '💳 Quanto deseja recarregar? Digite o valor (ex: 10.50):')
+    safe_answer_callback(c.id)
+    msg = bot.send_message(c.message.chat.id, '💳 Quanto deseja recarregar? Digite o valor (ex: 10.50):')
     bot.register_next_step_handler(msg, process_recharge_amount)
 
 @bot.callback_query_handler(lambda c: c.data == 'menu_numeros')
 def h_numeros(c):
-    bot.answer_callback_query(c.id)
+    safe_answer_callback(c.id)
     criar_usuario(c.from_user.id)
     lst = carregar_usuarios()[str(c.from_user.id)]['numeros']
     if not lst:
@@ -306,26 +312,25 @@ def cmd_comprar(m):
 
 @bot.callback_query_handler(lambda c: c.data.startswith('comprar_'))
 def cb_comprar(c):
-    # ... same purchase logic with spawn_sms_thread ...
-    pass
+    safe_answer_callback(c.id)
+    # ... purchase logic with spawn_sms_thread ...
 
 @bot.callback_query_handler(lambda c: c.data.startswith('retry_'))
 def retry_sms(c):
-    # ... same retry logic ...
-    pass
+    safe_answer_callback(c.id)
+    # ... retry logic ...
 
 @bot.callback_query_handler(lambda c: c.data.startswith('cancel_blocked_'))
 def cancel_blocked(c):
-    bot.answer_callback_query(c.id, '⏳ Disponível após 2 minutos.', show_alert=True)
+    safe_answer_callback(c.id, text='⏳ Disponível em 2 minutos.', show_alert=True)
 
 @bot.callback_query_handler(lambda c: c.data.startswith('cancel_'))
 def cancelar_user(c):
-    # ... same cancel logic ...
-    pass
+    safe_answer_callback(c.id)
+    # ... cancel logic ...
 
 # === SET WEBHOOK & RUN ===
 if __name__ == '__main__':
-    if TELEGRAM_WEBHOOK_URL:
-        bot.remove_webhook()
-        bot.set_webhook(url=TELEGRAM_WEBHOOK_URL + '/telegram_webhook')
+    bot.remove_webhook()
+    bot.set_webhook(url=TELEGRAM_WEBHOOK_URL + '/telegram_webhook')
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)))

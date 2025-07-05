@@ -1,4 +1,5 @@
-Flask
-pyTelegramBotAPI
-mercadopago
-requests
+Flask>=2.0
+pyTelegramBotAPI>=4.0
+mercadopago>=2.0
+requests>=2.0
+gunicorn>=20.0

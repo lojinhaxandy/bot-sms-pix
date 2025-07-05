@@ -23,10 +23,14 @@ MP_WEBHOOK_PATH      = os.getenv('MP_WEBHOOK_PATH', '/mp_webhook')
 INFO_BOT_TOKEN       = os.getenv('INFO_BOT_TOKEN')
 INFO_CHAT_ID         = os.getenv('INFO_CHAT_ID')
 
-SMSBOWER_URL    = 'https://smsbower.online/stubs/handler_api.php'
-USERS_FILE      = 'usuarios.json'
-PRAZO_MINUTOS   = 23
-PRAZO_SEGUNDOS  = PRAZO_MINUTOS * 60
+# === ARQUIVOS de dados ===
+USERS_FILE       = 'usuarios.json'
+RECHARGES_FILE   = 'recharges.json'
+
+# === Constantes ===
+SMSBOWER_URL     = 'https://smsbower.online/stubs/handler_api.php'
+PRAZO_MINUTOS    = 23
+PRAZO_SEGUNDOS   = PRAZO_MINUTOS * 60
 
 # === CLIENTES e APP ===
 bot       = telebot.TeleBot(BOT_TOKEN, threaded=False)
@@ -49,12 +53,37 @@ handler.setLevel(logging.WARNING)
 handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 logger.addHandler(handler)
 
-# === ESTADO GLOBAL ===
-data_lock       = threading.Lock()
-status_lock     = threading.Lock()
-status_map      = {}  # activation_id -> info dict
-recharge_by_pref = {}  # preference_id -> {'user_id','amount','chat_id'}
-recharge_by_ref  = {}  # external_reference -> {'user_id','amount','chat_id'}
+# === Helper para persistir recargas ===
+def carregar_recargas():
+    if not os.path.exists(RECHARGES_FILE):
+        with open(RECHARGES_FILE, 'w') as f:
+            json.dump([], f)
+    with open(RECHARGES_FILE, 'r') as f:
+        return json.load(f)
+
+def salvar_recargas(recargas):
+    with open(RECHARGES_FILE, 'w') as f:
+        json.dump(recargas, f, indent=2)
+
+def adicionar_recarga(pref_id, ext_ref, user_id, amount, chat_id):
+    recs = carregar_recargas()
+    recs.append({
+        'pref_id': pref_id,
+        'ext_ref': ext_ref,
+        'user_id': user_id,
+        'amount': amount,
+        'chat_id': chat_id
+    })
+    salvar_recargas(recs)
+
+def remover_recarga(pref_id=None, ext_ref=None):
+    recs = carregar_recargas()
+    for r in recs:
+        if (pref_id and r['pref_id'] == pref_id) or (ext_ref and r['ext_ref'] == ext_ref):
+            recs.remove(r)
+            salvar_recargas(recs)
+            return r
+    return None
 
 # === HELPERS ===
 def safe_answer_callback(query_id, text=None, show_alert=False):
@@ -76,16 +105,22 @@ def send_info_bot(text: str):
         logger.error(f"Falha ao notificar info bot: {e}")
 
 # === DADOS DO USUÁRIO ===
+data_lock = threading.Lock()
+status_lock = threading.Lock()
+status_map = {}
+
 def carregar_usuarios():
     with data_lock:
         if not os.path.exists(USERS_FILE):
-            with open(USERS_FILE, 'w') as f: json.dump({}, f)
+            with open(USERS_FILE, 'w') as f:
+                json.dump({}, f)
         with open(USERS_FILE, 'r') as f:
             return json.load(f)
 
 def salvar_usuarios(us):
     with data_lock:
-        with open(USERS_FILE, 'w') as f: json.dump(us, f, indent=2)
+        with open(USERS_FILE, 'w') as f:
+            json.dump(us, f, indent=2)
 
 def criar_usuario(uid):
     us = carregar_usuarios()
@@ -105,12 +140,13 @@ def adicionar_numero(uid, aid):
         u['numeros'].append(aid)
         salvar_usuarios(us)
 
-# === FUNÇÕES SMSBOWER ===
+# === SMSBOWER API ===
 def solicitar_numero(servico, max_price=None):
     params = {'api_key': SMSBOWER_API_KEY, 'action': 'getNumber', 'service': servico, 'country': COUNTRY_ID}
     if max_price: params['maxPrice'] = str(max_price)
     try:
-        r = requests.get(SMSBOWER_URL, params=params, timeout=15); r.raise_for_status()
+        r = requests.get(SMSBOWER_URL, params=params, timeout=15)
+        r.raise_for_status()
         txt = r.text.strip()
     except Exception as e:
         logger.error(f"getNumber erro: {e}")
@@ -130,19 +166,19 @@ def cancelar_numero(aid):
 
 def obter_status(aid):
     try:
-        r = requests.get(SMSBOWER_URL, params={
-            'api_key': SMSBOWER_API_KEY, 'action': 'getStatus', 'id': aid
-        }, timeout=10)
-        r.raise_for_status(); return r.text.strip()
+        r = requests.get(SMSBOWER_URL, params={'api_key': SMSBOWER_API_KEY, 'action': 'getStatus', 'id': aid}, timeout=10)
+        r.raise_for_status()
+        return r.text.strip()
     except Exception as e:
         logger.error(f"getStatus erro: {e}")
         return None
 
-# === THREAD PARA SMS (histórico de códigos) ===
+# === THREAD PARA SMS ===
 def spawn_sms_thread(aid):
     with status_lock:
         info = status_map.get(aid)
-    if not info: return
+    if not info:
+        return
     service, full, short, chat_id = info['service'], info['full'], info['short'], info['chat_id']
     sms_msg_id = info.get('sms_message_id')
     codes = info.setdefault('codes', [])
@@ -152,7 +188,8 @@ def spawn_sms_thread(aid):
         while time.time() - start < PRAZO_SEGUNDOS:
             s = obter_status(aid)
             if not s:
-                time.sleep(5); continue
+                time.sleep(5)
+                continue
             if s == 'STATUS_CANCEL':
                 u = status_map[aid]
                 alterar_saldo(u['user_id'], carregar_usuarios()[str(u['user_id'])]['saldo'] + u['price'])
@@ -160,16 +197,17 @@ def spawn_sms_thread(aid):
                 info['processed'] = True
                 return
             if any(s.startswith(pref) for pref in ('STATUS_OK:', 'ACCESS_ACTIVATION:', 'STATUS_WAIT_RETRY:')):
-                code = s.split(':',1)[1]
+                code = s.split(':', 1)[1]
             else:
-                time.sleep(5); continue
+                time.sleep(5)
+                continue
 
-            if code in codes: return
+            if code in codes:
+                return
             codes.append(code)
 
             rt = datetime.now().strftime('%d/%m/%Y %H:%M:%S')
-            sms_lines = "\n".join(f"📩 SMS: `{c}`" for c in codes)
-            text = f"📦 {service}\n☎️ `{full}` / `{short}`\n\n{sms_lines}\n🕘 {rt}"
+            text = f"📦 {service}\n☎️ `{full}` / `{short}`\n\n" + "\n".join(f"📩 `{c}`" for c in codes) + f"\n🕘 {rt}"
             kb = telebot.types.InlineKeyboardMarkup().add(
                 telebot.types.InlineKeyboardButton('📲 Outro SMS', callback_data=f'retry_{aid}')
             )
@@ -203,12 +241,8 @@ def mp_webhook():
         ext_ref = pay.get('external_reference')
         logger.info(f"Payment {payment_id}: status={status}, pref_id={pref_id}, ext_ref={ext_ref}")
 
-        # tenta por preference_id
-        ref = recharge_by_pref.pop(pref_id, None) if pref_id else None
-        # se não, tenta por external_reference
-        if ref is None and ext_ref:
-            ref = recharge_by_ref.pop(ext_ref, None)
-
+        # remove e obtém a recarga persistida
+        ref = remover_recarga(pref_id=pref_id) or remover_recarga(ext_ref=ext_ref)
         if not ref:
             logger.warning(f"No recharge found for pref_id={pref_id} ext_ref={ext_ref}")
         elif status == 'approved':
@@ -311,7 +345,7 @@ def cb_comprar(c):
 
     bot.edit_message_text('⏳ Solicitando número...', c.message.chat.id, c.message.message_id)
     resp = {}
-    for mp_ in range(1,14):
+    for mp_ in range(1, 14):
         resp = solicitar_numero(idsms[serv], max_price=mp_)
         if resp.get('status') == 'success':
             break
@@ -337,11 +371,9 @@ def cb_comprar(c):
     msg = bot.send_message(c.message.chat.id, text, parse_mode='Markdown', reply_markup=kb_block)
 
     with status_lock:
-        status_map[aid] = {
-            'user_id': user, 'price': price, 'chat_id': msg.chat.id,
-            'message_id': msg.message_id, 'service': service,
-            'full': full, 'short': short, 'processed': False
-        }
+        status_map[aid] = {'user_id':user,'price':price,'chat_id':msg.chat.id,
+                          'message_id':msg.message_id,'service':service,
+                          'full':full,'short':short,'processed':False}
 
     send_info_bot(f"📦 Serviço `{service}` comprado: `{full}`")
     spawn_sms_thread(aid)
@@ -380,9 +412,7 @@ def retry_sms(c):
     safe_answer_callback(c.id)
     aid = c.data.split('_',1)[1]
     try:
-        requests.get(SMSBOWER_URL, params={
-            'api_key': SMSBOWER_API_KEY, 'action': 'setStatus', 'status': '3', 'id': aid
-        }, timeout=10)
+        requests.get(SMSBOWER_URL, params={'api_key':SMSBOWER_API_KEY,'action':'setStatus','status':'3','id':aid},timeout=10)
         inf = status_map.get(aid)
         if inf: inf['processed'] = False
         spawn_sms_thread(aid)
@@ -423,8 +453,8 @@ def process_recharge_amount(m):
         "auto_return": "approved"
     }
     pref = mp_sdk.preference().create(pref_data)["response"]
-    recharge_by_pref[pref["id"]] = {"user_id": m.from_user.id, "amount": amt, "chat_id": m.chat.id}
-    recharge_by_ref[ext_ref]    = {"user_id": m.from_user.id, "amount": amt, "chat_id": m.chat.id}
+    # persiste em arquivo
+    adicionar_recarga(pref["id"], ext_ref, m.from_user.id, amt, m.chat.id)
 
     kb = telebot.types.InlineKeyboardMarkup().add(
         telebot.types.InlineKeyboardButton(f'💳 Pagar R${amt:.2f}', url=pref["init_point"])

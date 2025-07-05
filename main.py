@@ -24,7 +24,7 @@ COUNTRY_ID        = "73"   # Brasil
 MP_ACCESS_TOKEN   = os.getenv("MP_ACCESS_TOKEN")
 SITE_URL          = os.getenv("SITE_URL").rstrip("/")
 
-# === INIT BOTS & SDKs ===
+# === INICIALIZA BOTS E SDKs ===
 bot       = telebot.TeleBot(BOT_TOKEN, threaded=False)
 alert_bot = telebot.TeleBot(ALERT_BOT_TOKEN)
 mp_client = mercadopago.SDK(MP_ACCESS_TOKEN)
@@ -32,7 +32,7 @@ mp_client = mercadopago.SDK(MP_ACCESS_TOKEN)
 # === FLASK APP ===
 app = Flask(__name__)
 
-# --- Logging para Telegram de alertas ---
+# --- Logging para Telegram ---
 class TelegramLogHandler(logging.Handler):
     def emit(self, record):
         msg = self.format(record)
@@ -47,57 +47,53 @@ handler = TelegramLogHandler()
 handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
 logger.addHandler(handler)
 
-# --- Estado global e locks ---
+# --- Estado e locks ---
 USERS_FILE       = "usuarios.json"
 data_lock        = threading.Lock()
 status_lock      = threading.Lock()
-status_map       = {}    # aid → info dict for SMS flows
-PENDING_RECHARGE = {}    # user_id → True when awaiting amount input
+status_map       = {}    # aid → info dict
+PENDING_RECHARGE = {}    # user_id → True
 PRAZO_MINUTOS    = 23
 PRAZO_SEGUNDOS   = PRAZO_MINUTOS * 60
 
-# === AUXILIARES PARA USUÁRIOS ===
+# === Funções de usuário ===
 def carregar_usuarios():
     with data_lock:
         if not os.path.exists(USERS_FILE):
-            with open(USERS_FILE, "w") as f:
-                json.dump({}, f)
-        with open(USERS_FILE, "r") as f:
-            return json.load(f)
+            with open(USERS_FILE,"w") as f: json.dump({},f)
+        with open(USERS_FILE,"r") as f: return json.load(f)
 
 def salvar_usuarios(u):
     with data_lock:
-        with open(USERS_FILE, "w") as f:
-            json.dump(u, f, indent=2)
+        with open(USERS_FILE,"w") as f: json.dump(u,f,indent=2)
 
 def criar_usuario(uid):
     u = carregar_usuarios()
     if str(uid) not in u:
-        u[str(uid)] = {"saldo": 0.0, "numeros": []}
+        u[str(uid)] = {"saldo":0.0,"numeros":[]}
         salvar_usuarios(u)
         logger.info(f"Novo usuário criado: {uid}")
 
 def alterar_saldo(uid, novo):
     u = carregar_usuarios()
-    u.setdefault(str(uid), {"saldo":0.0, "numeros":[]})["saldo"] = novo
+    u.setdefault(str(uid),{"saldo":0.0,"numeros":[]})["saldo"] = novo
     salvar_usuarios(u)
     logger.info(f"Saldo de {uid} = R$ {novo:.2f}")
 
 def adicionar_numero(uid, aid):
     u = carregar_usuarios()
-    user = u.setdefault(str(uid), {"saldo":0.0, "numeros":[]})
+    user = u.setdefault(str(uid),{"saldo":0.0,"numeros":[]})
     if aid not in user["numeros"]:
         user["numeros"].append(aid)
         salvar_usuarios(u)
         logger.info(f"Adicionado número {aid} a {uid}")
 
-# === SMSBOWER API ===
+# === Integração SMSBOWER ===
 def solicitar_numero(servico, max_price=None):
-    params = {"api_key":API_KEY_SMSBOWER, "action":"getNumber", "service":servico, "country":COUNTRY_ID}
-    if max_price:
-        params["maxPrice"] = str(max_price)
+    params = {"api_key":API_KEY_SMSBOWER,"action":"getNumber","service":servico,"country":COUNTRY_ID}
+    if max_price: params["maxPrice"] = str(max_price)
     try:
-        r = requests.get(SMSBOWER_URL, params=params, timeout=15)
+        r = requests.get(SMSBOWER_URL,params=params,timeout=15)
         r.raise_for_status()
         text = r.text.strip()
         logger.info(f"GET_NUMBER → {r.url} → {text}")
@@ -111,99 +107,77 @@ def solicitar_numero(servico, max_price=None):
 
 def cancelar_numero(aid):
     try:
-        requests.get(SMSBOWER_URL, params={
-            "api_key":API_KEY_SMSBOWER,
-            "action":"setStatus",
-            "status":"8",
-            "id":aid
-        }, timeout=10)
+        requests.get(SMSBOWER_URL,params={
+            "api_key":API_KEY_SMSBOWER,"action":"setStatus","status":"8","id":aid
+        },timeout=10)
     except Exception as e:
         logger.error(f"Erro cancelar: {e}")
 
 def obter_status(aid):
     try:
-        r = requests.get(SMSBOWER_URL, params={
-            "api_key":API_KEY_SMSBOWER,
-            "action":"getStatus",
-            "id":aid
-        }, timeout=10)
-        r.raise_for_status()
-        return r.text.strip()
+        r = requests.get(SMSBOWER_URL,params={
+            "api_key":API_KEY_SMSBOWER,"action":"getStatus","id":aid
+        },timeout=10)
+        r.raise_for_status(); return r.text.strip()
     except Exception as e:
-        logger.error(f"Erro getStatus: {e}")
-        return None
+        logger.error(f"Erro getStatus: {e}"); return None
 
 def spawn_sms_thread(aid):
-    """Observa SMSs sucessivos e acumula códigos."""
-    info = status_map.get(aid)
-    if not info:
-        return
+    with status_lock:
+        info = status_map.get(aid)
+    if not info: return
 
-    service, full, short, chat_id = (
-        info["service"], info["full"], info["short"], info["chat_id"]
-    )
+    service, full, short, chat_id = (info[k] for k in ("service","full","short","chat_id"))
     sms_msg_id = info.get("sms_message_id")
-    info["codes"] = []  # armazena todos os códigos recebidos
+    info.setdefault("codes", [])
+    info.setdefault("canceled_by_user", False)
 
     def check_sms():
         start = time.time()
         while time.time() - start < PRAZO_SEGUNDOS:
             s = obter_status(aid)
             logger.info(f"CheckSMS → {aid}: {s}")
-            # ignora aguardando
+            if info["canceled_by_user"]:
+                return
             if not s or s.startswith("STATUS_WAIT"):
                 time.sleep(5)
                 continue
-            # cancelado pelo provedor
             if s == "STATUS_CANCEL":
-                alterar_saldo(
-                    info["user_id"],
-                    carregar_usuarios()[str(info["user_id"])]["saldo"] + info["price"]
-                )
-                bot.send_message(chat_id,
-                    f"❌ Cancelado pelo provider. R${info['price']:.2f} devolvido."
-                )
-                info["processed"] = True
+                # provider cancel
+                if not info["canceled_by_user"]:
+                    alterar_saldo(info["user_id"],
+                                  carregar_usuarios()[str(info["user_id"])]["saldo"] + info["price"])
+                    bot.send_message(chat_id,
+                                     f"❌ Cancelado pelo provider. R${info['price']:.2f} devolvido.")
                 return
-            # extrai código
+            # novo código
             code = s.split(":",1)[1] if ":" in s else s
-            # só trata se for novo
             if code not in info["codes"]:
                 info["codes"].append(code)
-                # bloqueia cancelamento depois do primeiro
-                info["processed"] = True
-
-                # monta texto com todos os códigos
+                # monta mensagem com todos os códigos
                 rt = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-                text = (
-                    f"📦 {service}\n"
-                    f"☎️ Número: `{full}`\n"
-                    f"☎️ Sem DDI: `{short}`\n\n"
-                )
-                for idx, cd in enumerate(info["codes"], 1):
-                    text += f"📩 SMS{idx}: `{cd}`\n"
+                text = (f"📦 {service}\n"
+                        f"☎️ Número: `{full}`\n"
+                        f"☎️ Sem DDI: `{short}`\n\n")
+                for i, cd in enumerate(info["codes"],1):
+                    text += f"📩 SMS{i}: `{cd}`\n"
                 text += f"🕘 {rt}"
-
-                # somente botão de retry
-                kb = telebot.types.InlineKeyboardMarkup()
-                kb.add(telebot.types.InlineKeyboardButton(
-                    "📲 Receber outro SMS", callback_data=f"retry_{aid}"
-                ))
-
+                kb = telebot.types.InlineKeyboardMarkup().add(
+                    telebot.types.InlineKeyboardButton("📲 Receber outro SMS",
+                                                       callback_data=f"retry_{aid}")
+                )
                 if sms_msg_id is None:
                     msg = bot.send_message(chat_id, text,
-                        parse_mode="Markdown", reply_markup=kb
-                    )
+                                           parse_mode="Markdown", reply_markup=kb)
                     info["sms_message_id"] = msg.message_id
                 else:
                     bot.edit_message_text(text, chat_id, sms_msg_id,
-                        parse_mode="Markdown", reply_markup=kb
-                    )
+                                          parse_mode="Markdown", reply_markup=kb)
             time.sleep(5)
 
     threading.Thread(target=check_sms, daemon=True).start()
 
-# === MENU E HANDLERS ===
+# === MENU & HANDLERS ===
 def send_menu(chat_id):
     kb = telebot.types.InlineKeyboardMarkup(row_width=1)
     kb.add(
@@ -220,14 +194,13 @@ def cmd_start(m):
     criar_usuario(m.from_user.id)
     send_menu(m.chat.id)
 
-# — Handle recharge amount —
+# aguarda valor para recarga
 @bot.message_handler(func=lambda m: PENDING_RECHARGE.get(m.from_user.id) and
                               re.fullmatch(r"\d+(\.\d{1,2})?", m.text))
 def handle_recharge_amount(m):
     user_id = m.from_user.id
     amount = float(m.text)
     PENDING_RECHARGE.pop(user_id, None)
-
     pref = mp_client.preference().create({
         "items":[{"title":"Recarga de saldo","quantity":1,"unit_price":amount}],
         "external_reference":f"{user_id}:{amount}",
@@ -243,8 +216,8 @@ def handle_recharge_amount(m):
         telebot.types.InlineKeyboardButton(f"💳 Pagar R$ {amount:.2f}", url=pay_url)
     )
     bot.send_message(m.chat.id,
-        f"Para recarregar R$ {amount:.2f}, clique abaixo:", reply_markup=kb
-    )
+                     f"Para recarregar R$ {amount:.2f}, clique abaixo:",
+                     reply_markup=kb)
     send_menu(m.chat.id)
 
 @bot.message_handler(func=lambda m: m.text and not m.text.startswith("/"))
@@ -278,7 +251,7 @@ def menu_numeros(c):
         text = "📋 *Seus números:*"
         for aid in lst:
             inf = status_map.get(aid)
-            if inf and not inf["processed"]:
+            if inf and not inf.get("processed"):
                 text += f"\n*ID:* `{aid}` `{inf['full']}` / `{inf['short']}`"
         bot.send_message(c.message.chat.id, text, parse_mode="Markdown")
     send_menu(c.message.chat.id)
@@ -325,10 +298,10 @@ def cb_comprar(c):
     adicionar_numero(user_id, aid)
     alterar_saldo(user_id, saldo - price)
 
-    kb_b = telebot.types.InlineKeyboardMarkup()
-    kb_b.add(telebot.types.InlineKeyboardButton("❌ Cancelar (2m)", callback_data=f"cancel_blocked_{aid}"))
-    kb_u = telebot.types.InlineKeyboardMarkup()
-    kb_u.add(telebot.types.InlineKeyboardButton("❌ Cancelar", callback_data=f"cancel_{aid}"))
+    kb_blocked = telebot.types.InlineKeyboardMarkup()
+    kb_blocked.add(telebot.types.InlineKeyboardButton("❌ Cancelar (2m)", callback_data=f"cancel_blocked_{aid}"))
+    kb_unlocked = telebot.types.InlineKeyboardMarkup()
+    kb_unlocked.add(telebot.types.InlineKeyboardButton("❌ Cancelar", callback_data=f"cancel_{aid}"))
 
     text = (
         f"📦 {service}\n"
@@ -337,7 +310,7 @@ def cb_comprar(c):
         f"🕘 Prazo: {PRAZO_MINUTOS} minutos\n\n"
         f"💡 Ativo por {PRAZO_MINUTOS} minutos; sem SMS, saldo devolvido automaticamente."
     )
-    msg = bot.send_message(c.message.chat.id, text, parse_mode="Markdown", reply_markup=kb_b)
+    msg = bot.send_message(c.message.chat.id, text, parse_mode="Markdown", reply_markup=kb_blocked)
 
     status_map[aid] = {
         "user_id": user_id,
@@ -347,8 +320,7 @@ def cb_comprar(c):
         "service": service,
         "full": full,
         "short": short,
-        "processed": False,
-        "sms_message_id": None
+        "processed": False
     }
     spawn_sms_thread(aid)
 
@@ -363,12 +335,11 @@ def cb_comprar(c):
                 f"🕘 Prazo: {rem} minuto{'s' if rem!=1 else ''}\n\n"
                 f"💡 Ativo por {PRAZO_MINUTOS} minutos; sem SMS, saldo devolvido automaticamente."
             )
-            mk = kb_u if rem < PRAZO_MINUTOS-1 else kb_b
+            mk = kb_unlocked if rem < PRAZO_MINUTOS-1 else kb_blocked
             try:
                 bot.edit_message_text(new_text, msg.chat.id, msg.message_id,
                                       parse_mode="Markdown", reply_markup=mk)
-            except:
-                pass
+            except: pass
 
     def auto_cancel():
         time.sleep(PRAZO_SEGUNDOS)
@@ -389,10 +360,7 @@ def retry_sms(c):
     aid = c.data.split("_",1)[1]
     try:
         requests.get(SMSBOWER_URL, params={
-            "api_key":API_KEY_SMSBOWER,
-            "action":"setStatus",
-            "status":"3",
-            "id":aid
+            "api_key":API_KEY_SMSBOWER,"action":"setStatus","status":"3","id":aid
         }, timeout=10)
         bot.answer_callback_query(c.id, "🔄 Novo SMS solicitado.", show_alert=True)
         status_map[aid]["processed"] = False
@@ -408,16 +376,20 @@ def cancel_blocked(c):
 @bot.callback_query_handler(lambda c: c.data.startswith("cancel_"))
 def cancelar_user(c):
     aid = c.data.split("_",1)[1]
-    info = status_map.get(aid)
-    # se já recebeu SMS (processed=True), não devolve mais
-    if not info or info["processed"]:
-        return bot.answer_callback_query(c.id, "❌ Não é possível cancelar.", True)
+    with status_lock:
+        info = status_map.get(aid)
+    if not info:
+        return
+    # se já recebeu SMS (codes list não vazia), impede cancelamento
+    if info.get("codes"):
+        return bot.answer_callback_query(c.id, "❌ Não é possível cancelar após receber SMS.", True)
+    # cancela e devolve uma única vez
+    info["canceled_by_user"] = True
     cancelar_numero(aid)
     alterar_saldo(info["user_id"],
                   carregar_usuarios()[str(info["user_id"])]["saldo"] + info["price"])
     bot.edit_message_text("❌ Cancelado pelo usuário.", info["chat_id"], info["message_id"])
-    bot.answer_callback_query(c.id, "Número cancelado e saldo devolvido.", show_alert=True)
-    info["processed"] = True
+    bot.answer_callback_query(c.id, "✅ Cancelado e saldo devolvido.", show_alert=True)
 
 # === WEBHOOKS ===
 @app.route("/", methods=["GET"])

@@ -49,11 +49,11 @@ class TelegramLogHandler(logging.Handler):
 logger = logging.getLogger('bot_sms')
 logger.setLevel(logging.INFO)
 handler = TelegramLogHandler()
-handler.setLevel(logging.WARNING)
+handler.setLevel(logging.WARNING)  # apenas WARNING+ vão pro alert_bot
 handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 logger.addHandler(handler)
 
-# === Helper para persistir recargas ===
+# === Persistência de recargas ===
 def carregar_recargas():
     if not os.path.exists(RECHARGES_FILE):
         with open(RECHARGES_FILE, 'w') as f:
@@ -85,12 +85,12 @@ def remover_recarga(pref_id=None, ext_ref=None):
             return r
     return None
 
-# === HELPERS ===
+# === Helpers gerais ===
 def safe_answer_callback(query_id, text=None, show_alert=False):
     try:
         bot.answer_callback_query(query_id, text=text, show_alert=show_alert)
     except ApiTelegramException as e:
-        logger.warning(f"Resposta callback falhou: {e}")
+        logger.warning(f"Callback answer failed: {e}")
 
 def send_info_bot(text: str):
     if not INFO_BOT_TOKEN or not INFO_CHAT_ID:
@@ -102,12 +102,12 @@ def send_info_bot(text: str):
             timeout=5
         ).raise_for_status()
     except Exception as e:
-        logger.error(f"Falha ao notificar info bot: {e}")
+        logger.error(f"Failed to notify info bot: {e}")
 
-# === DADOS DO USUÁRIO ===
-data_lock = threading.Lock()
+# === Dados de usuários ===
+data_lock   = threading.Lock()
 status_lock = threading.Lock()
-status_map = {}
+status_map  = {}
 
 def carregar_usuarios():
     with data_lock:
@@ -143,7 +143,8 @@ def adicionar_numero(uid, aid):
 # === SMSBOWER API ===
 def solicitar_numero(servico, max_price=None):
     params = {'api_key': SMSBOWER_API_KEY, 'action': 'getNumber', 'service': servico, 'country': COUNTRY_ID}
-    if max_price: params['maxPrice'] = str(max_price)
+    if max_price:
+        params['maxPrice'] = str(max_price)
     try:
         r = requests.get(SMSBOWER_URL, params=params, timeout=15)
         r.raise_for_status()
@@ -159,21 +160,28 @@ def solicitar_numero(servico, max_price=None):
 def cancelar_numero(aid):
     try:
         requests.get(SMSBOWER_URL, params={
-            'api_key': SMSBOWER_API_KEY, 'action': 'setStatus', 'status': '8', 'id': aid
+            'api_key': SMSBOWER_API_KEY,
+            'action': 'setStatus',
+            'status': '8',
+            'id': aid
         }, timeout=10)
     except Exception as e:
         logger.error(f"cancel erro: {e}")
 
 def obter_status(aid):
     try:
-        r = requests.get(SMSBOWER_URL, params={'api_key': SMSBOWER_API_KEY, 'action': 'getStatus', 'id': aid}, timeout=10)
+        r = requests.get(SMSBOWER_URL, params={
+            'api_key': SMSBOWER_API_KEY,
+            'action': 'getStatus',
+            'id': aid
+        }, timeout=10)
         r.raise_for_status()
         return r.text.strip()
     except Exception as e:
         logger.error(f"getStatus erro: {e}")
         return None
 
-# === THREAD PARA SMS ===
+# === Thread para verificação de SMS ===
 def spawn_sms_thread(aid):
     with status_lock:
         info = status_map.get(aid)
@@ -207,7 +215,12 @@ def spawn_sms_thread(aid):
             codes.append(code)
 
             rt = datetime.now().strftime('%d/%m/%Y %H:%M:%S')
-            text = f"📦 {service}\n☎️ `{full}` / `{short}`\n\n" + "\n".join(f"📩 `{c}`" for c in codes) + f"\n🕘 {rt}"
+            text = (
+                f"📦 {service}\n"
+                f"☎️ `{full}` / `{short}`\n\n" +
+                "\n".join(f"📩 `{c}`" for c in codes) +
+                f"\n🕘 {rt}"
+            )
             kb = telebot.types.InlineKeyboardMarkup().add(
                 telebot.types.InlineKeyboardButton('📲 Outro SMS', callback_data=f'retry_{aid}')
             )
@@ -230,7 +243,13 @@ def telegram_webhook():
 
 @app.route(MP_WEBHOOK_PATH, methods=['POST'])
 def mp_webhook():
-    data = request.get_json(force=True)
+    data = request.get_json(silent=True)
+    if not data:
+        data = {
+            'type': request.args.get('type'),
+            'data': {'id': request.args.get('data.id') or request.args.get('id')}
+        }
+
     logger.info(f"=== MP WEBHOOK RECEIVED ===\n{json.dumps(data, indent=2)}")
 
     if data.get('type') == 'payment':
@@ -241,7 +260,6 @@ def mp_webhook():
         ext_ref = pay.get('external_reference')
         logger.info(f"Payment {payment_id}: status={status}, pref_id={pref_id}, ext_ref={ext_ref}")
 
-        # remove e obtém a recarga persistida
         ref = remover_recarga(pref_id=pref_id) or remover_recarga(ext_ref=ext_ref)
         if not ref:
             logger.warning(f"No recharge found for pref_id={pref_id} ext_ref={ext_ref}")
@@ -257,7 +275,9 @@ def mp_webhook():
                 f"✅ Recarga de *R${amt:.2f}* aprovada!\nSaldo: R${before:.2f} → R${after:.2f}",
                 parse_mode='Markdown'
             )
-            send_info_bot(f"💰 *Recarga aprovada*\nUsuário: `{uid}`\nValor: R${amt:.2f}\nSaldo: R${after:.2f}")
+            send_info_bot(
+                f"💰 *Recarga aprovada*\nUsuário: `{uid}`\nValor: R${amt:.2f}\nSaldo: R${after:.2f}"
+            )
         else:
             logger.info(f"Pagamento {payment_id} status `{status}`, aguardando approved.")
 
@@ -345,7 +365,7 @@ def cb_comprar(c):
 
     bot.edit_message_text('⏳ Solicitando número...', c.message.chat.id, c.message.message_id)
     resp = {}
-    for mp_ in range(1, 14):
+    for mp_ in range(1,14):
         resp = solicitar_numero(idsms[serv], max_price=mp_)
         if resp.get('status') == 'success':
             break
@@ -365,15 +385,20 @@ def cb_comprar(c):
         telebot.types.InlineKeyboardButton('❌ Cancelar', callback_data=f'cancel_{aid}')
     )
 
-    text = (f"📦 {service}\n☎️ `{full}` / `{short}`\n\n"
-            f"🕘 Prazo: {PRAZO_MINUTOS} minutos\n"
-            "_💡 Ativo por 23m; sem SMS, saldo devolvido automaticamente._")
+    text = (
+        f"📦 {service}\n"
+        f"☎️ `{full}` / `{short}`\n\n"
+        f"🕘 Prazo: {PRAZO_MINUTOS} minutos\n"
+        "_💡 Ativo por 23m; sem SMS, saldo devolvido automaticamente._"
+    )
     msg = bot.send_message(c.message.chat.id, text, parse_mode='Markdown', reply_markup=kb_block)
 
     with status_lock:
-        status_map[aid] = {'user_id':user,'price':price,'chat_id':msg.chat.id,
-                          'message_id':msg.message_id,'service':service,
-                          'full':full,'short':short,'processed':False}
+        status_map[aid] = {
+            'user_id': user, 'price': price, 'chat_id': msg.chat.id,
+            'message_id': msg.message_id, 'service': service,
+            'full': full, 'short': short, 'processed': False
+        }
 
     send_info_bot(f"📦 Serviço `{service}` comprado: `{full}`")
     spawn_sms_thread(aid)
@@ -382,9 +407,12 @@ def cb_comprar(c):
         rem = PRAZO_MINUTOS
         for i in range(PRAZO_MINUTOS):
             time.sleep(60); rem -= 1
-            new = (f"📦 {service}\n☎️ `{full}` / `{short}`\n\n"
-                   f"🕘 Prazo: {rem} minuto{'s' if rem!=1 else ''}\n"
-                   "_💡 Ativo por 23m; sem SMS, saldo devolvido automaticamente._")
+            new = (
+                f"📦 {service}\n"
+                f"☎️ `{full}` / `{short}`\n\n"
+                f"🕘 Prazo: {rem} minuto{'s' if rem!=1 else ''}\n"
+                "_💡 Ativo por 23m; sem SMS, saldo devolvido automaticamente._"
+            )
             kb = kb_unblock if i >= 2 else kb_block
             try:
                 bot.edit_message_text(new, msg.chat.id, msg.message_id,
@@ -412,7 +440,9 @@ def retry_sms(c):
     safe_answer_callback(c.id)
     aid = c.data.split('_',1)[1]
     try:
-        requests.get(SMSBOWER_URL, params={'api_key':SMSBOWER_API_KEY,'action':'setStatus','status':'3','id':aid},timeout=10)
+        requests.get(SMSBOWER_URL, params={
+            'api_key': SMSBOWER_API_KEY, 'action': 'setStatus', 'status': '3', 'id': aid
+        }, timeout=10)
         inf = status_map.get(aid)
         if inf: inf['processed'] = False
         spawn_sms_thread(aid)
@@ -434,12 +464,13 @@ def cancelar_user(c):
     if not inf or inf['processed']:
         return bot.answer_callback_query(c.id,'❌ Não pode cancelar.',True)
     cancelar_numero(aid)
-    alterar_saldo(inf['user_id'],carregar_usuarios()[str(inf['user_id'])]['saldo']+inf['price'])
-    bot.edit_message_text('❌ Cancelado pelo usuário.',inf['chat_id'],inf['message_id'])
+    alterar_saldo(inf['user_id'],
+                  carregar_usuarios()[str(inf['user_id'])]['saldo'] + inf['price'])
+    bot.edit_message_text('❌ Cancelado pelo usuário.', inf['chat_id'], inf['message_id'])
     bot.answer_callback_query(c.id,'Cancelado e devolvido.',True)
     inf['processed'] = True
 
-# === PROCESSO DE RECARGA MP ===
+# === Processamento de recarga MP ===
 def process_recharge_amount(m):
     try:
         amt = float(m.text.replace(',', '.'))
@@ -453,7 +484,6 @@ def process_recharge_amount(m):
         "auto_return": "approved"
     }
     pref = mp_sdk.preference().create(pref_data)["response"]
-    # persiste em arquivo
     adicionar_recarga(pref["id"], ext_ref, m.from_user.id, amt, m.chat.id)
 
     kb = telebot.types.InlineKeyboardMarkup().add(
@@ -464,7 +494,7 @@ def process_recharge_amount(m):
         reply_markup=kb)
     send_info_bot(f"💳 Recarga iniciada: Usuário `{m.from_user.id}` R${amt:.2f}")
 
-# === INICIALIZAÇÃO ===
+# === Inicialização ===
 if __name__ == '__main__':
     bot.remove_webhook()
     bot.set_webhook(url=TELEGRAM_WEBHOOK_URL + '/telegram_webhook')

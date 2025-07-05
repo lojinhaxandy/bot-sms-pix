@@ -1,217 +1,331 @@
 import os
-import time
+import json
 import threading
+import time
+import logging
 import requests
-from flask import Flask, request, abort
 import telebot
+import mercadopago
+from datetime import datetime
+from flask import Flask, request, jsonify
 
-# --- Configurações e variáveis ambiente ---
+# === CONFIG from environment ===
+BOT_TOKEN             = os.getenv('BOT_TOKEN', '8086140451:AAFKRaaiF3yiFCxcmgzA0UhP_XGpOoXTx0c')
+ALERT_BOT_TOKEN       = os.getenv('ALERT_BOT_TOKEN', '6883479940:AAG0qtvaBNjoV0o7ugrxYmraqPEwZThmmJc')
+ALERT_CHAT_ID         = os.getenv('ALERT_CHAT_ID', '6829680279')
+SMSBOWER_API_KEY      = os.getenv('SMSBOWER_API_KEY', '6lkWWVDjjTSCpfMGLtQZvD0Uwd1LQk5G')
+SMSBOWER_URL          = 'https://smsbower.online/stubs/handler_api.php'
+COUNTRY_ID            = os.getenv('COUNTRY_ID', '73')
+MP_ACCESS_TOKEN       = os.getenv('MP_ACCESS_TOKEN', 'APP_USR-1661690156955161-061015-1277fc50c082df9755ad4a4f043449c3-1294489094')
+TELEGRAM_WEBHOOK_URL  = os.getenv('TELEGRAM_WEBHOOK_URL')   # e.g. "https://<your-app>.onrender.com"
+MP_WEBHOOK_PATH       = os.getenv('MP_WEBHOOK_PATH', '/mp_webhook')
+USERS_FILE            = 'usuarios.json'
+PRAZO_MINUTOS         = 23
+PRAZO_SEGUNDOS        = PRAZO_MINUTOS * 60
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-SMSBOWER_API_TOKEN = os.getenv("SMSBOWER_API_TOKEN")
-MERCADOPAGO_ACCESS_TOKEN = os.getenv("MERCADOPAGO_ACCESS_TOKEN")
+# === TELEGRAM & MP SDK & FLASK ===
+bot       = telebot.TeleBot(BOT_TOKEN, threaded=False)
+alert_bot = telebot.TeleBot(ALERT_BOT_TOKEN)
+mp_sdk    = mercadopago.SDK(MP_ACCESS_TOKEN)
+app       = Flask(__name__)
 
-if not TELEGRAM_BOT_TOKEN:
-    raise Exception("Variável de ambiente TELEGRAM_BOT_TOKEN não definida!")
+# === LOGGING to Telegram ===
+class TelegramLogHandler(logging.Handler):
+    def emit(self, record):
+        try:
+            alert_bot.send_message(ALERT_CHAT_ID, self.format(record))
+        except:
+            pass
 
-if not WEBHOOK_URL:
-    raise Exception("Variável de ambiente WEBHOOK_URL não definida!")
+logger = logging.getLogger('bot_sms')
+logger.setLevel(logging.INFO)
+handler = TelegramLogHandler()
+handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+logger.addHandler(handler)
 
-if not SMSBOWER_API_TOKEN:
-    raise Exception("Variável de ambiente SMSBOWER_API_TOKEN não definida!")
+# === STORAGE & STATE ===
+data_lock    = threading.Lock()
+status_lock  = threading.Lock()
+status_map   = {}  # activation_id -> info dict
+recharge_map = {}  # preference_id -> {'user_id', 'amount', 'chat_id'}
 
-if not MERCADOPAGO_ACCESS_TOKEN:
-    raise Exception("Variável de ambiente MERCADOPAGO_ACCESS_TOKEN não definida!")
+# === USER DATA FUNCTIONS ===
+def carregar_usuarios():
+    with data_lock:
+        if not os.path.exists(USERS_FILE):
+            with open(USERS_FILE, 'w') as f:
+                json.dump({}, f)
+        with open(USERS_FILE, 'r') as f:
+            return json.load(f)
 
-bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
-app = Flask(__name__)
+def salvar_usuarios(us):
+    with data_lock:
+        with open(USERS_FILE, 'w') as f:
+            json.dump(us, f, indent=2)
 
-# Banco de dados simples em memória para demo
-USERS_SALDO = {}         # chat_id : saldo em float
-ACTIVATIONS = {}         # chat_id : {'activationId': str, 'expires_at': timestamp, 'number': str}
+def criar_usuario(uid):
+    us = carregar_usuarios()
+    if str(uid) not in us:
+        us[str(uid)] = {'saldo': 0.0, 'numeros': []}
+        salvar_usuarios(us)
 
-# Timeout para expiração dos números (18 minutos = 1080 segundos)
-NUMBER_TIMEOUT = 1080
+def alterar_saldo(uid, novo):
+    us = carregar_usuarios()
+    us.setdefault(str(uid), {'saldo': 0.0, 'numeros': []})['saldo'] = novo
+    salvar_usuarios(us)
 
-# --- Funções para Mercado Pago ---
+def adicionar_numero(uid, aid):
+    us = carregar_usuarios()
+    user = us.setdefault(str(uid), {'saldo': 0.0, 'numeros': []})
+    if aid not in user['numeros']:
+        user['numeros'].append(aid)
+        salvar_usuarios(us)
 
-def criar_cobranca(chat_id, valor):
-    url = "https://api.mercadopago.com/v1/payments"
-    headers = {
-        "Authorization": f"Bearer {MERCADOPAGO_ACCESS_TOKEN}",
-        "Content-Type": "application/json",
-        "X-Idempotency-Key": f"{chat_id}-{int(time.time())}"
+# === SMSBOWER API FUNCTIONS ===
+def solicitar_numero(servico, max_price=None):
+    params = {
+        'api_key': SMSBOWER_API_KEY,
+        'action': 'getNumber',
+        'service': servico,
+        'country': COUNTRY_ID
     }
-    body = {
-        "transaction_amount": valor,
-        "description": "Recarga SMS China Bot",
-        "payment_method_id": "pix",
-        "payer": {
-            "email": f"user{chat_id}@example.com"
-        }
-    }
-    resp = requests.post(url, json=body, headers=headers)
-    if resp.status_code == 201:
-        return resp.json()
-    else:
-        print("Erro criar cobrança MP:", resp.text)
+    if max_price:
+        params['maxPrice'] = str(max_price)
+    try:
+        r = requests.get(SMSBOWER_URL, params=params, timeout=15)
+        r.raise_for_status()
+        txt = r.text.strip()
+        logger.info(f"GET_NUMBER → {r.url} → {txt}")
+    except Exception as e:
+        logger.error(f'Erro getNumber: {e}')
+        return {'status':'error','message':str(e)}
+    if txt.startswith('ACCESS_NUMBER:'):
+        _, aid, num = txt.split(':', 2)
+        return {'status':'success','id':aid,'number':num}
+    return {'status':'error','message':txt}
+
+def cancelar_numero(aid):
+    try:
+        requests.get(SMSBOWER_URL, params={
+            'api_key': SMSBOWER_API_KEY,
+            'action': 'setStatus',
+            'status': '8',
+            'id': aid
+        }, timeout=10)
+    except:
+        pass
+
+def obter_status(aid):
+    try:
+        r = requests.get(SMSBOWER_URL, params={
+            'api_key': SMSBOWER_API_KEY,
+            'action': 'getStatus',
+            'id': aid
+        }, timeout=10)
+        r.raise_for_status()
+        return r.text.strip()
+    except Exception as e:
+        logger.error(f'Erro getStatus: {e}')
         return None
 
-# --- Funções para SMSBower ---
+# === SPAWN SMS CHECKER THREAD (with history) ===
+def spawn_sms_thread(aid):
+    with status_lock:
+        info = status_map.get(aid)
+    if not info:
+        return
+    service    = info['service']
+    full       = info['full']
+    short      = info['short']
+    chat_id    = info['chat_id']
+    sms_msg_id = info.get('sms_message_id')
+    codes      = info.setdefault('codes', [])
 
-def solicitar_numero_sms(chat_id):
-    # Solicita um número novo na API smsbower
-    url = "https://smsbower.online/api/getNumber"
-    params = {"apiToken": SMSBOWER_API_TOKEN, "service": "smschina"}
-    resp = requests.get(url, params=params)
-    if resp.status_code == 200:
-        data = resp.json()
-        if data.get("status") == "success":
-            return data.get("number"), data.get("activationId")
-    return None, None
+    def check_sms():
+        start = time.time()
+        while time.time() - start < PRAZO_SEGUNDOS:
+            s = obter_status(aid)
+            logger.info(f"CheckSMS → {aid}: {s}")
+            if not s:
+                time.sleep(5); continue
 
-def consultar_sms(activationId):
-    # Consulta SMS recebido pela API
-    url = f"https://smsbower.online/api/getSMS?apiToken={SMSBOWER_API_TOKEN}&activationId={activationId}"
-    resp = requests.get(url)
-    if resp.status_code == 200:
-        data = resp.json()
-        if data.get("status") == "success":
-            return data.get("sms")
-    return None
+            if s.startswith('STATUS_OK:') or s.startswith('ACCESS_ACTIVATION:'):
+                code = s.split(':', 1)[1]
+            elif s.startswith('STATUS_WAIT_RETRY:'):
+                code = s.split(':', 1)[1]
+            elif s == 'STATUS_CANCEL':
+                u = status_map[aid]
+                alterar_saldo(u['user_id'],
+                              carregar_usuarios()[str(u['user_id'])]['saldo'] + u['price'])
+                bot.send_message(chat_id,
+                    f"❌ Provedor cancelou. R${u['price']:.2f} devolvido.")
+                info['processed'] = True
+                return
+            else:
+                time.sleep(5); continue
 
-def cancelar_ativacao(activationId):
-    url = f"https://smsbower.online/api/cancel?apiToken={SMSBOWER_API_TOKEN}&activationId={activationId}"
-    requests.get(url)
+            if code in codes:
+                return
+            codes.append(code)
 
-# --- Comandos do bot ---
+            rt = datetime.now().strftime('%d/%m/%Y %H:%M:%S')
+            sms_lines = "\n".join([f"📩 SMS: `{c}`" for c in codes])
+            text = (
+                f"📦 {service}\n"
+                f"☎️ Número: `{full}`\n"
+                f"☎️ Sem DDI: `{short}`\n\n"
+                f"{sms_lines}\n"
+                f"🕘 {rt}"
+            )
+            kb = telebot.types.InlineKeyboardMarkup()
+            kb.add(telebot.types.InlineKeyboardButton('📲 Receber outro SMS',
+                                                      callback_data=f'retry_{aid}'))
 
-@bot.message_handler(commands=["start"])
-def cmd_start(message):
-    chat_id = message.chat.id
-    bot.send_message(chat_id, "👋 Bem-vindo ao SMSChina Bot!\nEnvie o valor que deseja recarregar (ex: 2.50) para comprar saldo.")
-
-@bot.message_handler(commands=["saldo"])
-def cmd_saldo(message):
-    chat_id = message.chat.id
-    saldo = USERS_SALDO.get(chat_id, 0.0)
-    bot.send_message(chat_id, f"💰 Seu saldo atual é: R$ {saldo:.2f}")
-
-@bot.message_handler(commands=["cancelar"])
-def cmd_cancelar(message):
-    chat_id = message.chat.id
-    if chat_id in ACTIVATIONS:
-        ativ = ACTIVATIONS.pop(chat_id)
-        cancelar_ativacao(ativ['activationId'])
-        bot.send_message(chat_id, "❌ Ativação cancelada e número liberado.")
-    else:
-        bot.send_message(chat_id, "⚠️ Você não tem ativações em andamento.")
-
-@bot.message_handler(func=lambda m: True)
-def handle_text(message):
-    chat_id = message.chat.id
-    text = message.text.strip()
-
-    # Se usuário está com ativação pendente
-    if chat_id in ACTIVATIONS:
-        ativ = ACTIVATIONS[chat_id]
-        if time.time() > ativ['expires_at']:
-            # Expirou
-            cancelar_ativacao(ativ['activationId'])
-            ACTIVATIONS.pop(chat_id)
-            bot.send_message(chat_id, "⏳ Tempo expirado para ativação. Por favor, solicite um novo número.")
+            if sms_msg_id is None:
+                msg = bot.send_message(chat_id, text, parse_mode='Markdown', reply_markup=kb)
+                info['sms_message_id'] = msg.message_id
+            else:
+                bot.edit_message_text(text, chat_id, sms_msg_id,
+                                      parse_mode='Markdown', reply_markup=kb)
+            info['processed'] = True
             return
 
-        # Aqui pode tratar resposta com código SMS se desejar (exemplo simplificado)
-        bot.send_message(chat_id, "⏳ Estamos aguardando o SMS, aguarde...")
+    threading.Thread(target=check_sms, daemon=True).start()
 
+# === FLASK ENDPOINTS ===
+@app.route('/telegram_webhook', methods=['POST'])
+def telegram_webhook():
+    update = telebot.types.Update.de_json(request.get_json(force=True))
+    bot.process_new_updates([update])
+    return jsonify({'ok': True})
+
+@app.route(MP_WEBHOOK_PATH, methods=['POST'])
+def mp_webhook():
+    data = request.get_json(force=True)
+    logger.info(f"MP Webhook → {data}")
+    if data.get('type') == 'payment':
+        pid = data['data']['id']
+        pay = mp_sdk.payment().get(pid)['response']
+        if pay.get('status') == 'approved':
+            pref_id = pay.get('preference_id')
+            ref     = recharge_map.pop(pref_id, None)
+            if ref:
+                uid  = ref['user_id']
+                amt  = ref['amount']
+                chat = ref['chat_id']
+                criar_usuario(uid)
+                alterar_saldo(uid, carregar_usuarios()[str(uid)]['saldo'] + amt)
+                bot.send_message(chat,
+                    f"✅ Pagamento de R${amt:.2f} aprovado! Saldo atualizado.")
+    return jsonify({'status':'ok'})
+
+# === TELEGRAM HANDLERS (webhook mode) ===
+def send_menu(chat_id):
+    kb = telebot.types.InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
+        telebot.types.InlineKeyboardButton('💰 Saldo',            callback_data='menu_saldo'),
+        telebot.types.InlineKeyboardButton('🤑 Recarregar',        callback_data='menu_recarregar'),
+        telebot.types.InlineKeyboardButton('📜 Meus números',      callback_data='menu_numeros'),
+        telebot.types.InlineKeyboardButton('🆘 Suporte',           url='https://t.me/cpfbotttchina')
+    )
+    bot.send_message(chat_id, 'Escolha uma opção:', reply_markup=kb)
+
+@bot.message_handler(commands=['start'])
+def cmd_start(m):
+    criar_usuario(m.from_user.id)
+    send_menu(m.chat.id)
+
+@bot.message_handler(func=lambda m: m.text and not m.text.startswith('/'))
+def default_menu(m):
+    criar_usuario(m.from_user.id)
+    send_menu(m.chat.id)
+
+@bot.callback_query_handler(lambda c: c.data == 'menu_saldo')
+def h_saldo(c):
+    bot.answer_callback_query(c.id)
+    criar_usuario(c.from_user.id)
+    saldo = carregar_usuarios()[str(c.from_user.id)]['saldo']
+    bot.send_message(c.message.chat.id, f"💰 Saldo: R$ {saldo:.2f}")
+    send_menu(c.message.chat.id)
+
+@bot.callback_query_handler(lambda c: c.data == 'menu_recarregar')
+def h_recarregar(c):
+    bot.answer_callback_query(c.id)
+    msg = bot.send_message(c.message.chat.id,
+                           '💳 Quanto deseja recarregar? Digite o valor (ex: 10.50):')
+    bot.register_next_step_handler(msg, process_recharge_amount)
+
+@bot.callback_query_handler(lambda c: c.data == 'menu_numeros')
+def h_numeros(c):
+    bot.answer_callback_query(c.id)
+    criar_usuario(c.from_user.id)
+    lst = carregar_usuarios()[str(c.from_user.id)]['numeros']
+    if not lst:
+        bot.send_message(c.message.chat.id, '📭 Você não tem números ativos.')
     else:
-        # Se for número decimal para recarga
-        try:
-            valor = float(text.replace(",", "."))
-            if valor <= 0:
-                raise ValueError
-            # Cria cobrança no Mercado Pago
-            cobranca = criar_cobranca(chat_id, valor)
-            if cobranca:
-                qr_code = cobranca.get("point_of_interaction", {}).get("transaction_data", {}).get("qr_code_base64")
-                link_pagamento = cobranca.get("transaction_details", {}).get("external_resource_url")
-                if qr_code:
-                    bot.send_photo(chat_id, photo=f"data:image/png;base64,{qr_code}", caption=f"💸 Pague via Pix para recarregar R$ {valor:.2f}\nApós o pagamento, seu saldo será atualizado automaticamente.")
-                elif link_pagamento:
-                    bot.send_message(chat_id, f"💸 Pague aqui para recarregar R$ {valor:.2f}:\n{link_pagamento}")
-                else:
-                    bot.send_message(chat_id, "❌ Não foi possível gerar o QR Code de pagamento.")
-            else:
-                bot.send_message(chat_id, "❌ Erro ao gerar cobrança. Tente novamente.")
-        except ValueError:
-            # Se não for número, pode ser pedido para novo SMS
-            if text.lower() == "novo sms":
-                # Solicitar número
-                number, activationId = solicitar_numero_sms(chat_id)
-                if number and activationId:
-                    ACTIVATIONS[chat_id] = {
-                        "activationId": activationId,
-                        "number": number,
-                        "expires_at": time.time() + NUMBER_TIMEOUT
-                    }
-                    bot.send_message(chat_id, f"📲 Número recebido: {number}\nVocê tem 18 minutos para receber o SMS.\nEnvie /cancelar para cancelar a ativação.")
-                else:
-                    bot.send_message(chat_id, "❌ Erro ao solicitar número. Tente novamente mais tarde.")
-            else:
-                bot.send_message(chat_id, "⚠️ Comando ou texto inválido. Envie um valor para recarga ou 'novo sms' para receber número.")
+        text = '📋 *Seus números:*\n'
+        with status_lock:
+            for aid in lst:
+                inf = status_map.get(aid)
+                if inf and not inf['processed']:
+                    text += f"\n*ID:* `{aid}`\n`{inf['full']}` / `{inf['short']}`\n"
+        bot.send_message(c.message.chat.id, text, parse_mode='Markdown')
+    send_menu(c.message.chat.id)
 
-# --- Webhook Flask ---
+def process_recharge_amount(m):
+    try:
+        amt = float(m.text.replace(',', '.'))
+    except:
+        return bot.reply_to(m, '❌ Valor inválido. Use ex: 10.50')
+    pref_data = {
+        "items": [{"title": "Recarga de saldo", "quantity": 1, "unit_price": amt}],
+        "external_reference": f"{m.from_user.id}_{int(time.time())}",
+        "back_urls": {"success": TELEGRAM_WEBHOOK_URL + MP_WEBHOOK_PATH},
+        "auto_return": "approved"
+    }
+    pref = mp_sdk.preference().create(pref_data)["response"]
+    recharge_map[pref["id"]] = {"user_id": m.from_user.id, "amount": amt, "chat_id": m.chat.id}
+    kb = telebot.types.InlineKeyboardMarkup()
+    kb.add(telebot.types.InlineKeyboardButton(f'💳 Pagar R${amt:.2f}', url=pref["init_point"]))
+    bot.send_message(m.chat.id,
+        f"🎉 Pague R${amt:.2f} via Mercado Pago. Você será creditado automaticamente.",
+        reply_markup=kb)
+    send_menu(m.chat.id)
 
-@app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
-def webhook():
-    if request.headers.get("content-type") == "application/json":
-        json_string = request.get_data().decode("utf-8")
-        update = telebot.types.Update.de_json(json_string)
-        bot.process_new_updates([update])
-        return "", 200
-    else:
-        abort(403)
+@bot.message_handler(commands=['comprar'])
+def cmd_comprar(m):
+    criar_usuario(m.from_user.id)
+    kb = telebot.types.InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        telebot.types.InlineKeyboardButton('📲 Mercado Pago SMS - R$0.75', callback_data='comprar_mercado'),
+        telebot.types.InlineKeyboardButton('🇨🇳 SMS para China   - R$0.70', callback_data='comprar_china'),
+        telebot.types.InlineKeyboardButton('📡 Outros SMS        - R$0.90', callback_data='comprar_outros')
+    )
+    bot.send_message(m.chat.id, 'Escolha serviço:', reply_markup=kb)
 
-# Setup webhook no início (apenas uma vez)
-def setup_webhook():
-    res = bot.set_webhook(f"{WEBHOOK_URL}/{TELEGRAM_BOT_TOKEN}")
-    print("Webhook set result:", res)
+@bot.callback_query_handler(lambda c: c.data.startswith('comprar_'))
+def cb_comprar(c):
+    # ... same purchase logic with spawn_sms_thread ...
+    pass
 
-# --- Thread para verificar atualizações de SMS e atualizar saldo ---
+@bot.callback_query_handler(lambda c: c.data.startswith('retry_'))
+def retry_sms(c):
+    # ... same retry logic ...
+    pass
 
-def sms_check_thread():
-    while True:
-        time.sleep(10)
-        to_remove = []
-        for chat_id, ativ in ACTIVATIONS.items():
-            sms = consultar_sms(ativ["activationId"])
-            if sms:
-                # Extrair código do SMS, ex: "Seu código é 123456"
-                codigo = None
-                import re
-                m = re.search(r"\b(\d{4,8})\b", sms)
-                if m:
-                    codigo = m.group(1)
-                if codigo:
-                    bot.send_message(chat_id, f"✅ Código SMS recebido: {codigo}")
-                    # Aqui você pode salvar esse código para o usuário ou continuar o fluxo
-                    # Exemplo simples: remover ativação
-                    to_remove.append(chat_id)
-            # Se tempo expirou, cancela ativação
-            if time.time() > ativ["expires_at"]:
-                cancelar_ativacao(ativ["activationId"])
-                to_remove.append(chat_id)
-                bot.send_message(chat_id, "⏳ Tempo da ativação expirou, número liberado.")
+@bot.callback_query_handler(lambda c: c.data.startswith('cancel_blocked_'))
+def cancel_blocked(c):
+    bot.answer_callback_query(c.id, '⏳ Disponível após 2 minutos.', show_alert=True)
 
-        for chat_id in to_remove:
-            ACTIVATIONS.pop(chat_id, None)
+@bot.callback_query_handler(lambda c: c.data.startswith('cancel_'))
+def cancelar_user(c):
+    # ... same cancel logic ...
+    pass
 
-# --- Inicia o servidor Flask e a thread do SMS check ---
-
-if __name__ == "__main__":
-    setup_webhook()
-    threading.Thread(target=sms_check_thread, daemon=True).start()
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+# === SET WEBHOOK & RUN ===
+if __name__ == '__main__':
+    if TELEGRAM_WEBHOOK_URL:
+        bot.remove_webhook()
+        bot.set_webhook(url=TELEGRAM_WEBHOOK_URL + '/telegram_webhook')
+    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)))

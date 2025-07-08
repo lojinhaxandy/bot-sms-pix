@@ -69,6 +69,7 @@ def carregar_usuarios():
         with open(USERS_FILE, "r") as f:
             return json.load(f)
 
+
 def salvar_usuarios(u):
     with data_lock:
         with open(USERS_FILE, "w") as f:
@@ -80,6 +81,7 @@ def salvar_usuarios(u):
     except Exception as e:
         logger.error(f"Erro ao enviar backup: {e}")
 
+
 def criar_usuario(uid):
     u = carregar_usuarios()
     if str(uid) not in u:
@@ -87,11 +89,13 @@ def criar_usuario(uid):
         salvar_usuarios(u)
         logger.info(f"Novo usuário criado: {uid}")
 
+
 def alterar_saldo(uid, novo):
     u = carregar_usuarios()
     u.setdefault(str(uid), {"saldo":0.0, "numeros":[]})["saldo"] = novo
     salvar_usuarios(u)
     logger.info(f"Saldo de {uid} = R$ {novo:.2f}")
+
 
 def adicionar_numero(uid, aid):
     u = carregar_usuarios()
@@ -124,6 +128,7 @@ def solicitar_numero(servico, max_price=None):
         return {"status":"success","id":aid,"number":num}
     return {"status":"error","message":text}
 
+
 def cancelar_numero(aid):
     try:
         requests.get(
@@ -139,6 +144,7 @@ def cancelar_numero(aid):
         logger.info(f"Cancelado provider: {aid}")
     except Exception as e:
         logger.error(f"Erro cancelar: {e}")
+
 
 def obter_status(aid):
     try:
@@ -205,7 +211,7 @@ def spawn_sms_thread(aid):
                 for idx, cd in enumerate(info['codes'], 1):
                     text += f"📩 SMS{idx}: `{cd}`\n"
                 text += f"🕘 {rt}"
-                # Inline keyboard com retry + botões extras
+                # Inline keyboard com retry + botões
                 kb = telebot.types.InlineKeyboardMarkup()
                 kb.row(
                     telebot.types.InlineKeyboardButton(
@@ -399,7 +405,7 @@ def cb_comprar(c):
     adicionar_numero(user_id, aid)
     alterar_saldo(user_id, balance - price)
 
-    # keyboards com botões extras
+    # keyboards
     kb_blocked = telebot.types.InlineKeyboardMarkup()
     kb_blocked.row(
         telebot.types.InlineKeyboardButton(
@@ -482,7 +488,7 @@ def cb_comprar(c):
             except:
                 pass
 
-        def auto_cancel():
+    def auto_cancel():
         time.sleep(PRAZO_SEGUNDOS)
         info = status_map.get(aid)
         if info and not info.get('codes') and not info.get('canceled_by_user'):
@@ -574,4 +580,3 @@ if __name__ == '__main__':
     bot.remove_webhook()
     bot.set_webhook(f"{SITE_URL}/webhook/telegram")
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
-

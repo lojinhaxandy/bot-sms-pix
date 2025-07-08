@@ -482,7 +482,96 @@ def cb_comprar(c):
             except:
                 pass
 
-    def auto_cancel():
+        def auto_cancel():
         time.sleep(PRAZO_SEGUNDOS)
         info = status_map.get(aid)
-        if info and not info.get('codes') and not info
+        if info and not info.get('codes') and not info.get('canceled_by_user'):
+            cancelar_numero(aid)
+            alterar_saldo(
+                info['user_id'],
+                carregar_usuarios()[str(info['user_id'])]['saldo'] + info['price']
+            )
+            try:
+                bot.delete_message(info['chat_id'], info['message_id'])
+            except:
+                pass
+
+    threading.Thread(target=countdown, daemon=True).start()
+    threading.Thread(target=auto_cancel, daemon=True).start()
+
+@bot.callback_query_handler(lambda c: c.data.startswith('retry_'))
+def retry_sms(c):
+    aid = c.data.split('_', 1)[1]
+    try:
+        requests.get(
+            SMSBOWER_URL,
+            params={'api_key':API_KEY_SMSBOWER,'action':'setStatus','status':'3','id':aid},
+            timeout=10
+        )
+    except:
+        pass
+    bot.answer_callback_query(c.id, '🔄 Novo SMS solicitado.', show_alert=True)
+    spawn_sms_thread(aid)
+
+@bot.callback_query_handler(lambda c: c.data.startswith('cancel_blocked_'))
+def cancel_blocked(c):
+    bot.answer_callback_query(c.id, '⏳ Disponível após 2 minutos.', show_alert=True)
+
+@bot.callback_query_handler(lambda c: c.data.startswith('cancel_'))
+def cancelar_user(c):
+    aid = c.data.split('_', 1)[1]
+    info = status_map.get(aid)
+    if not info or info.get('codes'):
+        return bot.answer_callback_query(c.id, '❌ Não pode cancelar após receber SMS.', True)
+    info['canceled_by_user'] = True
+    cancelar_numero(aid)
+    alterar_saldo(
+        info['user_id'],
+        carregar_usuarios()[str(info['user_id'])]['saldo'] + info['price']
+    )
+    try:
+        bot.delete_message(info['chat_id'], info['message_id'])
+    except:
+        pass
+    bot.answer_callback_query(c.id, '✅ Cancelado e saldo devolvido.', show_alert=True)
+
+# === WEBHOOKS ===
+@app.route('/', methods=['GET'])
+def health():
+    return 'OK', 200
+
+@app.route('/webhook/telegram', methods=['POST'])
+def telegram_webhook():
+    json_str = request.get_data().decode('utf-8')
+    upd = telebot.types.Update.de_json(json_str)
+    bot.process_new_updates([upd])
+    return '', 200
+
+@app.route('/webhook/mercadopago', methods=['POST'])
+def mp_webhook():
+    data = request.get_json()
+    if data.get('type') == 'payment':
+        pid = data['data']['id']
+        resp = mp_client.payment().get(pid)['response']
+        if resp.get('status') == 'approved':
+            ext = resp.get('external_reference', '')
+            if ':' in ext:
+                uid_str, amt_str = ext.split(':', 1)
+                try:
+                    uid = int(uid_str)
+                    amt = float(amt_str)
+                    current = carregar_usuarios().get(str(uid), {}).get('saldo', 0.0)
+                    alterar_saldo(uid, current + amt)
+                    bot.send_message(
+                        uid,
+                        f"✅ Recarga de R$ {amt:.2f} confirmada! Seu novo saldo é R$ {current + amt:.2f}"
+                    )
+                except Exception as e:
+                    logger.error(f"Erro external_reference: {e}")
+    return '', 200
+
+if __name__ == '__main__':
+    bot.remove_webhook()
+    bot.set_webhook(f"{SITE_URL}/webhook/telegram")
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+

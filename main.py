@@ -23,7 +23,6 @@ SMSBOWER_URL      = "https://smsbower.online/stubs/handler_api.php"
 COUNTRY_ID        = "73"
 MP_ACCESS_TOKEN   = os.getenv("MP_ACCESS_TOKEN")
 SITE_URL          = os.getenv("SITE_URL").rstrip('/')
-# Bot para backup de usuarios.json
 BACKUP_BOT_TOKEN  = '7982928818:AAEPf9AgnSEqEL7Ay5UaMPyG27h59PdGUYs'
 BACKUP_CHAT_ID    = '6829680279'
 
@@ -69,7 +68,6 @@ def carregar_usuarios():
         with open(USERS_FILE, "r") as f:
             return json.load(f)
 
-
 def salvar_usuarios(u):
     with data_lock:
         with open(USERS_FILE, "w") as f:
@@ -81,7 +79,6 @@ def salvar_usuarios(u):
     except Exception as e:
         logger.error(f"Erro ao enviar backup: {e}")
 
-
 def criar_usuario(uid):
     u = carregar_usuarios()
     if str(uid) not in u:
@@ -89,13 +86,11 @@ def criar_usuario(uid):
         salvar_usuarios(u)
         logger.info(f"Novo usuário criado: {uid}")
 
-
 def alterar_saldo(uid, novo):
     u = carregar_usuarios()
     u.setdefault(str(uid), {"saldo":0.0, "numeros":[]})["saldo"] = novo
     salvar_usuarios(u)
     logger.info(f"Saldo de {uid} = R$ {novo:.2f}")
-
 
 def adicionar_numero(uid, aid):
     u = carregar_usuarios()
@@ -128,7 +123,6 @@ def solicitar_numero(servico, max_price=None):
         return {"status":"success","id":aid,"number":num}
     return {"status":"error","message":text}
 
-
 def cancelar_numero(aid):
     try:
         requests.get(
@@ -144,7 +138,6 @@ def cancelar_numero(aid):
         logger.info(f"Cancelado provider: {aid}")
     except Exception as e:
         logger.error(f"Erro cancelar: {e}")
-
 
 def obter_status(aid):
     try:
@@ -324,6 +317,12 @@ def handle_recharge_amount(m):
     )
     send_menu(m.chat.id)
 
+# Só mostra o menu SE NÃO ESTIVER aguardando valor de recarga!
+@bot.message_handler(func=lambda m: not PENDING_RECHARGE.get(m.from_user.id) and m.text and not m.text.startswith('/'))
+def default_menu(m):
+    criar_usuario(m.from_user.id)
+    send_menu(m.chat.id)
+
 @bot.callback_query_handler(lambda c: c.data == 'menu_saldo')
 def menu_saldo(c):
     bot.answer_callback_query(c.id)
@@ -352,8 +351,8 @@ def menu_numeros(c):
         )
     send_menu(c.message.chat.id)
 
-@bot.callback_query_handler(lambda c: c.data.startswith('comprar_'))
-def menu_comprar(c):
+@bot.callback_query_handler(lambda c: c.data == 'menu_comprar')
+def callback_menu_comprar(c):
     bot.answer_callback_query(c.id)
     cmd_comprar(c.message)
 

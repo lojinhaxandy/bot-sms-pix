@@ -23,6 +23,7 @@ SMSBOWER_URL      = "https://smsbower.online/stubs/handler_api.php"
 COUNTRY_ID        = "73"
 MP_ACCESS_TOKEN   = os.getenv("MP_ACCESS_TOKEN")
 SITE_URL          = os.getenv("SITE_URL").rstrip('/')
+# Bot para backup de usuarios.json
 BACKUP_BOT_TOKEN  = '7982928818:AAEPf9AgnSEqEL7Ay5UaMPyG27h59PdGUYs'
 BACKUP_CHAT_ID    = '6829680279'
 
@@ -194,7 +195,6 @@ def spawn_sms_thread(aid):
             code = status.split(':', 1)[1] if ':' in status else status
             if code not in info['codes']:
                 info['codes'].append(code)
-                # Monta texto com todos os códigos
                 rt = datetime.now().strftime('%d/%m/%Y %H:%M:%S')
                 text = (
                     f"📦 {service}\n"
@@ -204,7 +204,6 @@ def spawn_sms_thread(aid):
                 for idx, cd in enumerate(info['codes'], 1):
                     text += f"📩 SMS{idx}: `{cd}`\n"
                 text += f"🕘 {rt}"
-                # Inline keyboard com retry + botões
                 kb = telebot.types.InlineKeyboardMarkup()
                 kb.row(
                     telebot.types.InlineKeyboardButton(
@@ -241,21 +240,12 @@ def spawn_sms_thread(aid):
 def send_menu(chat_id):
     kb = telebot.types.InlineKeyboardMarkup(row_width=1)
     kb.add(
-        telebot.types.InlineKeyboardButton(
-            '📲 Comprar serviços', callback_data='menu_comprar'
-        ),
-        telebot.types.InlineKeyboardButton(
-            '💰 Saldo', callback_data='menu_saldo'
-        ),
-        telebot.types.InlineKeyboardButton(
-            '🤑 Recarregar', callback_data='menu_recarregar'
-        ),
-        telebot.types.InlineKeyboardButton(
-            '📜 Meus números', callback_data='menu_numeros'
-        ),
-        telebot.types.InlineKeyboardButton(
-            '🆘 Suporte', url='https://t.me/cpfbotttchina'
-        )
+        telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
+        telebot.types.InlineKeyboardButton('💰 Saldo', callback_data='menu_saldo'),
+        telebot.types.InlineKeyboardButton('🤑 Recarregar', callback_data='menu_recarregar'),
+        telebot.types.InlineKeyboardButton('📜 Meus números', callback_data='menu_numeros'),
+        telebot.types.InlineKeyboardButton('🎯 Referência', callback_data='menu_referencias'),
+        telebot.types.InlineKeyboardButton('🆘 Suporte', url='https://t.me/cpfbotttchina')
     )
     bot.send_message(chat_id, 'Escolha uma opção:', reply_markup=kb)
 
@@ -264,27 +254,48 @@ def callback_menu(c):
     bot.answer_callback_query(c.id)
     send_menu(c.message.chat.id)
 
+@bot.callback_query_handler(lambda c: c.data == 'menu_referencias')
+def menu_referencias(c):
+    bot.answer_callback_query(c.id)
+    link = f"https://t.me/{bot.get_me().username}?start={c.from_user.id}"
+    txt = (
+        "🎯 *Indique e Ganhe!*\n\n"
+        f"Compartilhe seu link:\n`{link}`\n\n"
+        "Toda vez que alguém entrar pelo seu link e recarregar saldo, "
+        "*você recebe 10%* do valor automaticamente!"
+    )
+    bot.send_message(c.message.chat.id, txt, parse_mode='Markdown')
+    send_menu(c.message.chat.id)
+
+@bot.message_handler(commands=['minhalink'])
+def minhalink(m):
+    link = f"https://t.me/{bot.get_me().username}?start={m.from_user.id}"
+    bot.send_message(
+        m.chat.id,
+        f"🎯 Seu link de indicação:\n\n`{link}`\n\n"
+        "Indique amigos e ganhe *10%* de todas recargas que eles fizerem!",
+        parse_mode="Markdown"
+    )
+
 @bot.message_handler(commands=['start'])
 def cmd_start(m):
     criar_usuario(m.from_user.id)
+    # Referência por link
+    parts = m.text.split()
+    if len(parts) > 1:
+        ref_id = parts[1]
+        if ref_id != str(m.from_user.id):
+            usuarios = carregar_usuarios()
+            if "refer" not in usuarios.get(str(m.from_user.id), {}):
+                usuarios[str(m.from_user.id)]["refer"] = str(ref_id)
+                salvar_usuarios(usuarios)
     send_menu(m.chat.id)
-
-@bot.callback_query_handler(lambda c: c.data == 'menu_recarregar')
-def menu_recarregar(c):
-    bot.answer_callback_query(c.id)
-    criar_usuario(c.from_user.id)
-    PENDING_RECHARGE[c.from_user.id] = True
-    bot.send_message(
-        c.message.chat.id,
-        'Digite o valor (em reais) que deseja recarregar:'
-    )
 
 @bot.message_handler(func=lambda m: PENDING_RECHARGE.get(m.from_user.id) and re.fullmatch(r"\d+(\.\d{1,2})?", m.text))
 def handle_recharge_amount(m):
     uid = m.from_user.id
     amount = float(m.text)
     PENDING_RECHARGE.pop(uid, None)
-
     pref = mp_client.preference().create({
         "items": [{"title": "Recarga de saldo", "quantity": 1, "unit_price": amount}],
         "external_reference": f"{uid}:{amount}",
@@ -317,13 +328,22 @@ def handle_recharge_amount(m):
     )
     send_menu(m.chat.id)
 
-# Só mostra o menu SE NÃO ESTIVER aguardando valor de recarga!
-@bot.message_handler(func=lambda m: not PENDING_RECHARGE.get(m.from_user.id) and m.text and not m.text.startswith('/'))
+@bot.message_handler(func=lambda m: m.text and not m.text.startswith('/'))
 def default_menu(m):
     criar_usuario(m.from_user.id)
     send_menu(m.chat.id)
 
-@bot.callback_query_handler(lambda c: c.data == 'menu_saldo')
+@bot.callback_query_handler(lambda c: c.data=='menu_recarregar')
+def menu_recarregar(c):
+    bot.answer_callback_query(c.id)
+    criar_usuario(c.from_user.id)
+    PENDING_RECHARGE[c.from_user.id] = True
+    bot.send_message(
+        c.message.chat.id,
+        'Digite o valor (em reais) que deseja recarregar:'
+    )
+
+@bot.callback_query_handler(lambda c: c.data=='menu_saldo')
 def menu_saldo(c):
     bot.answer_callback_query(c.id)
     criar_usuario(c.from_user.id)
@@ -331,7 +351,7 @@ def menu_saldo(c):
     bot.send_message(c.message.chat.id, f"💰 Saldo: R$ {s:.2f}")
     send_menu(c.message.chat.id)
 
-@bot.callback_query_handler(lambda c: c.data == 'menu_numeros')
+@bot.callback_query_handler(lambda c: c.data=='menu_numeros')
 def menu_numeros(c):
     bot.answer_callback_query(c.id)
     criar_usuario(c.from_user.id)
@@ -351,8 +371,8 @@ def menu_numeros(c):
         )
     send_menu(c.message.chat.id)
 
-@bot.callback_query_handler(lambda c: c.data == 'menu_comprar')
-def callback_menu_comprar(c):
+@bot.callback_query_handler(lambda c: c.data.startswith('comprar_'))
+def menu_comprar(c):
     bot.answer_callback_query(c.id)
     cmd_comprar(c.message)
 
@@ -565,12 +585,27 @@ def mp_webhook():
                 try:
                     uid = int(uid_str)
                     amt = float(amt_str)
-                    current = carregar_usuarios().get(str(uid), {}).get('saldo', 0.0)
+                    usuarios = carregar_usuarios()
+                    current = usuarios.get(str(uid), {}).get('saldo', 0.0)
                     alterar_saldo(uid, current + amt)
                     bot.send_message(
                         uid,
                         f"✅ Recarga de R$ {amt:.2f} confirmada! Seu novo saldo é R$ {current + amt:.2f}"
                     )
+                    # Bônus de referência
+                    user_data = usuarios.get(str(uid), {})
+                    ref_id = user_data.get("refer")
+                    if ref_id and ref_id != str(uid):
+                        bonus = round(amt * 0.10, 2)
+                        refdata = usuarios.get(str(ref_id))
+                        if refdata:
+                            refsaldo = refdata.get("saldo", 0.0) + bonus
+                            usuarios[str(ref_id)]["saldo"] = refsaldo
+                            salvar_usuarios(usuarios)
+                            bot.send_message(
+                                int(ref_id),
+                                f"🎉 Você ganhou R$ {bonus:.2f} de bônus porque um indicado recarregou!\nContinue indicando e ganhe sempre 10% de todas recargas deles! 💰"
+                            )
                 except Exception as e:
                     logger.error(f"Erro external_reference: {e}")
     return '', 200

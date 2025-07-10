@@ -1,5 +1,3 @@
-# app.py
-
 import os
 import json
 import threading
@@ -14,7 +12,7 @@ from flask import Flask, request
 import telebot
 import mercadopago
 
-# === CONFIGURAÇÃO VIA ENV ===
+# === CONFIG ===
 BOT_TOKEN         = os.getenv("BOT_TOKEN")
 ALERT_BOT_TOKEN   = os.getenv("ALERT_BOT_TOKEN")
 ALERT_CHAT_ID     = os.getenv("ALERT_CHAT_ID")
@@ -23,19 +21,18 @@ SMSBOWER_URL      = "https://smsbower.online/stubs/handler_api.php"
 COUNTRY_ID        = "73"
 MP_ACCESS_TOKEN   = os.getenv("MP_ACCESS_TOKEN")
 SITE_URL          = os.getenv("SITE_URL").rstrip('/')
+
+# Bot para backup do usuarios.json
 BACKUP_BOT_TOKEN  = '7982928818:AAEPf9AgnSEqEL7Ay5UaMPyG27h59PdGUYs'
 BACKUP_CHAT_ID    = '6829680279'
 
-# === INIT BOTS & SDKs ===
 bot         = telebot.TeleBot(BOT_TOKEN, threaded=False)
 alert_bot   = telebot.TeleBot(ALERT_BOT_TOKEN)
 backup_bot  = telebot.TeleBot(BACKUP_BOT_TOKEN)
 mp_client   = mercadopago.SDK(MP_ACCESS_TOKEN)
 
-# === FLASK APP ===
 app = Flask(__name__)
 
-# --- Logger para alertas no Telegram ---
 class TelegramLogHandler(logging.Handler):
     def emit(self, record):
         msg = self.format(record)
@@ -50,16 +47,15 @@ handler = TelegramLogHandler()
 handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
 logger.addHandler(handler)
 
-# --- Estado e locks ---
 USERS_FILE       = "usuarios.json"
 data_lock        = threading.Lock()
 status_lock      = threading.Lock()
-status_map       = {}            # aid -> activation info
-PENDING_RECHARGE = {}            # user_id -> awaiting amount
+status_map       = {}            
+PENDING_RECHARGE = {}            
 PRAZO_MINUTOS    = 23
 PRAZO_SEGUNDOS   = PRAZO_MINUTOS * 60
 
-# === Funções de usuário ===
+# === Usuários ===
 def carregar_usuarios():
     with data_lock:
         if not os.path.exists(USERS_FILE):
@@ -72,35 +68,39 @@ def salvar_usuarios(u):
     with data_lock:
         with open(USERS_FILE, "w") as f:
             json.dump(u, f, indent=2)
-    # envia backup do JSON via Telegram
+    # Backup Telegram
     try:
         with open(USERS_FILE, 'rb') as bf:
             backup_bot.send_document(BACKUP_CHAT_ID, bf)
     except Exception as e:
         logger.error(f"Erro ao enviar backup: {e}")
 
-def criar_usuario(uid):
+def criar_usuario(uid, refer=None):
     u = carregar_usuarios()
     if str(uid) not in u:
-        u[str(uid)] = {"saldo": 0.0, "numeros": []}
+        u[str(uid)] = {
+            "saldo": 0.0,
+            "numeros": [],
+            "refer": str(refer) if refer and refer != uid else None
+        }
         salvar_usuarios(u)
         logger.info(f"Novo usuário criado: {uid}")
 
 def alterar_saldo(uid, novo):
     u = carregar_usuarios()
-    u.setdefault(str(uid), {"saldo":0.0, "numeros":[]})["saldo"] = novo
+    u.setdefault(str(uid), {"saldo":0.0, "numeros":[], "refer":None})["saldo"] = novo
     salvar_usuarios(u)
     logger.info(f"Saldo de {uid} = R$ {novo:.2f}")
 
 def adicionar_numero(uid, aid):
     u = carregar_usuarios()
-    user = u.setdefault(str(uid), {"saldo":0.0, "numeros":[]})
+    user = u.setdefault(str(uid), {"saldo":0.0, "numeros":[], "refer":None})
     if aid not in user["numeros"]:
         user["numeros"].append(aid)
         salvar_usuarios(u)
         logger.info(f"Número {aid} adicionado a {uid}")
 
-# === Integração com SMSBOWER ===
+# === SMSBOWER ===
 def solicitar_numero(servico, max_price=None):
     params = {
         'api_key': API_KEY_SMSBOWER,
@@ -156,7 +156,6 @@ def obter_status(aid):
         logger.error(f"Erro getStatus: {e}")
         return None
 
-# === Thread para monitorar SMS ===
 def spawn_sms_thread(aid):
     with status_lock:
         info = status_map.get(aid)
@@ -194,7 +193,6 @@ def spawn_sms_thread(aid):
             code = status.split(':', 1)[1] if ':' in status else status
             if code not in info['codes']:
                 info['codes'].append(code)
-                # Monta texto com todos os códigos
                 rt = datetime.now().strftime('%d/%m/%Y %H:%M:%S')
                 text = (
                     f"📦 {service}\n"
@@ -204,7 +202,6 @@ def spawn_sms_thread(aid):
                 for idx, cd in enumerate(info['codes'], 1):
                     text += f"📩 SMS{idx}: `{cd}`\n"
                 text += f"🕘 {rt}"
-                # Inline keyboard com retry + botões
                 kb = telebot.types.InlineKeyboardMarkup()
                 kb.row(
                     telebot.types.InlineKeyboardButton(
@@ -237,7 +234,6 @@ def spawn_sms_thread(aid):
 
     threading.Thread(target=check_sms, daemon=True).start()
 
-# === Menu e handlers ===
 def send_menu(chat_id):
     kb = telebot.types.InlineKeyboardMarkup(row_width=1)
     kb.add(
@@ -264,9 +260,20 @@ def callback_menu(c):
     bot.answer_callback_query(c.id)
     send_menu(c.message.chat.id)
 
+# --- Sistema de referência: link /start <id> e comando ---
+@bot.message_handler(commands=['minhalink'])
+def minhalink(m):
+    username = bot.get_me().username
+    link = f"https://t.me/{username}?start={m.from_user.id}"
+    bot.send_message(m.chat.id, f"Seu link de indicação:\n{link}")
+
 @bot.message_handler(commands=['start'])
 def cmd_start(m):
-    criar_usuario(m.from_user.id)
+    args = m.text.split()
+    refer = None
+    if len(args) > 1 and args[1].isdigit():
+        refer = int(args[1])
+    criar_usuario(m.from_user.id, refer)
     send_menu(m.chat.id)
 
 @bot.callback_query_handler(lambda c: c.data == 'menu_recarregar')
@@ -317,12 +324,6 @@ def handle_recharge_amount(m):
     )
     send_menu(m.chat.id)
 
-# Só mostra o menu SE NÃO ESTIVER aguardando valor de recarga!
-@bot.message_handler(func=lambda m: not PENDING_RECHARGE.get(m.from_user.id) and m.text and not m.text.startswith('/'))
-def default_menu(m):
-    criar_usuario(m.from_user.id)
-    send_menu(m.chat.id)
-
 @bot.callback_query_handler(lambda c: c.data == 'menu_saldo')
 def menu_saldo(c):
     bot.answer_callback_query(c.id)
@@ -351,8 +352,8 @@ def menu_numeros(c):
         )
     send_menu(c.message.chat.id)
 
-@bot.callback_query_handler(lambda c: c.data == 'menu_comprar')
-def callback_menu_comprar(c):
+@bot.callback_query_handler(lambda c: c.data.startswith('comprar_'))
+def menu_comprar(c):
     bot.answer_callback_query(c.id)
     cmd_comprar(c.message)
 
@@ -404,7 +405,6 @@ def cb_comprar(c):
     adicionar_numero(user_id, aid)
     alterar_saldo(user_id, balance - price)
 
-    # keyboards
     kb_blocked = telebot.types.InlineKeyboardMarkup()
     kb_blocked.row(
         telebot.types.InlineKeyboardButton(
@@ -529,11 +529,11 @@ def cancelar_user(c):
     if not info or info.get('codes'):
         return bot.answer_callback_query(c.id, '❌ Não pode cancelar após receber SMS.', True)
     info['canceled_by_user'] = True
-    cancelar_numero(aid)
     alterar_saldo(
         info['user_id'],
         carregar_usuarios()[str(info['user_id'])]['saldo'] + info['price']
     )
+    cancelar_numero(aid)
     try:
         bot.delete_message(info['chat_id'], info['message_id'])
     except:
@@ -565,12 +565,27 @@ def mp_webhook():
                 try:
                     uid = int(uid_str)
                     amt = float(amt_str)
-                    current = carregar_usuarios().get(str(uid), {}).get('saldo', 0.0)
+                    usuarios = carregar_usuarios()
+                    current = usuarios.get(str(uid), {}).get('saldo', 0.0)
                     alterar_saldo(uid, current + amt)
                     bot.send_message(
                         uid,
                         f"✅ Recarga de R$ {amt:.2f} confirmada! Seu novo saldo é R$ {current + amt:.2f}"
                     )
+                    # Bônus para referenciador em todas as recargas!
+                    user_data = usuarios.get(str(uid), {})
+                    ref_id = user_data.get("refer")
+                    if ref_id and ref_id != str(uid):
+                        bonus = round(amt * 0.10, 2)
+                        refdata = usuarios.get(str(ref_id))
+                        if refdata:
+                            refsaldo = refdata.get("saldo", 0.0) + bonus
+                            usuarios[str(ref_id)]["saldo"] = refsaldo
+                            salvar_usuarios(usuarios)
+                            bot.send_message(
+                                int(ref_id),
+                                f"🎉 Você ganhou R$ {bonus:.2f} de bônus por recarga de um indicado!\nContinue indicando e ganhe sempre 10% de todas recargas deles! 💰"
+                            )
                 except Exception as e:
                     logger.error(f"Erro external_reference: {e}")
     return '', 200

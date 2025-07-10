@@ -610,6 +610,7 @@ def mp_webhook():
                     if refid and str(refid) in u:
                         bonus = round(amt * 0.10, 2)
                         u[str(refid)]["saldo"] += bonus
+                        salvar_usuarios(u)  # <-- isso salva o saldo no arquivo E faz backup!
                         try:
                             bot.send_message(
                                 int(refid),

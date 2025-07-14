@@ -23,20 +23,16 @@ SMSBOWER_URL      = "https://smsbower.online/stubs/handler_api.php"
 COUNTRY_ID        = "73"
 MP_ACCESS_TOKEN   = os.getenv("MP_ACCESS_TOKEN")
 SITE_URL          = os.getenv("SITE_URL").rstrip('/')
-# Bot para backup de usuarios.json
 BACKUP_BOT_TOKEN  = '7982928818:AAEPf9AgnSEqEL7Ay5UaMPyG27h59PdGUYs'
 BACKUP_CHAT_ID    = '6829680279'
 
-# === INIT BOTS & SDKs ===
 bot         = telebot.TeleBot(BOT_TOKEN, threaded=False)
 alert_bot   = telebot.TeleBot(ALERT_BOT_TOKEN)
 backup_bot  = telebot.TeleBot(BACKUP_BOT_TOKEN)
 mp_client   = mercadopago.SDK(MP_ACCESS_TOKEN)
 
-# === FLASK APP ===
 app = Flask(__name__)
 
-# --- Logger para alertas no Telegram ---
 class TelegramLogHandler(logging.Handler):
     def emit(self, record):
         msg = self.format(record)
@@ -51,16 +47,14 @@ handler = TelegramLogHandler()
 handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
 logger.addHandler(handler)
 
-# --- Estado e locks ---
 USERS_FILE       = "usuarios.json"
 data_lock        = threading.Lock()
 status_lock      = threading.Lock()
-status_map       = {}            # aid -> activation info
-PENDING_RECHARGE = {}            # user_id -> awaiting amount
+status_map       = {}
+PENDING_RECHARGE = {}
 PRAZO_MINUTOS    = 23
 PRAZO_SEGUNDOS   = PRAZO_MINUTOS * 60
 
-# === Funções de usuário ===
 def carregar_usuarios():
     with data_lock:
         if not os.path.exists(USERS_FILE):
@@ -73,7 +67,6 @@ def salvar_usuarios(u):
     with data_lock:
         with open(USERS_FILE, "w") as f:
             json.dump(u, f, indent=2)
-    # envia backup do JSON via Telegram
     try:
         with open(USERS_FILE, 'rb') as bf:
             backup_bot.send_document(BACKUP_CHAT_ID, bf)
@@ -86,7 +79,6 @@ def criar_usuario(uid, refer=None):
         u[str(uid)] = {"saldo": 0.0, "numeros": []}
         if refer and str(refer) != str(uid) and str(refer) in u:
             u[str(uid)]["refer"] = str(refer)
-            # Adiciona na lista de indicados do referenciador
             if "indicados" not in u[str(refer)]:
                 u[str(refer)]["indicados"] = []
             if str(uid) not in u[str(refer)]["indicados"]:
@@ -111,7 +103,6 @@ def adicionar_numero(uid, aid):
 def get_user_ref_link(uid):
     return f"https://t.me/{bot.get_me().username}?start={uid}"
 
-# === Integração com SMSBOWER ===
 def solicitar_numero(servico, max_price=None):
     params = {
         'api_key': API_KEY_SMSBOWER,
@@ -167,7 +158,6 @@ def obter_status(aid):
         logger.error(f"Erro getStatus: {e}")
         return None
 
-# === Thread para monitorar SMS ===
 def spawn_sms_thread(aid):
     with status_lock:
         info = status_map.get(aid)
@@ -205,7 +195,6 @@ def spawn_sms_thread(aid):
             code = status.split(':', 1)[1] if ':' in status else status
             if code not in info['codes']:
                 info['codes'].append(code)
-                # Monta texto com todos os códigos
                 rt = datetime.now().strftime('%d/%m/%Y %H:%M:%S')
                 text = (
                     f"📦 {service}\n"
@@ -215,7 +204,6 @@ def spawn_sms_thread(aid):
                 for idx, cd in enumerate(info['codes'], 1):
                     text += f"📩 SMS{idx}: `{cd}`\n"
                 text += f"🕘 {rt}"
-                # Inline keyboard com retry + botões
                 kb = telebot.types.InlineKeyboardMarkup()
                 kb.row(
                     telebot.types.InlineKeyboardButton(
@@ -245,10 +233,8 @@ def spawn_sms_thread(aid):
                     )
                     info['sms_message_id'] = m.message_id
             time.sleep(5)
-
     threading.Thread(target=check_sms, daemon=True).start()
 
-# === Menu e handlers ===
 def send_menu(chat_id):
     kb = telebot.types.InlineKeyboardMarkup(row_width=1)
     kb.add(
@@ -286,6 +272,9 @@ def show_comprar_menu(chat_id):
         ),
         telebot.types.InlineKeyboardButton(
             '🇨🇳 SMS para China   - R$0.60', callback_data='comprar_china'
+        ),
+        telebot.types.InlineKeyboardButton(
+            '💸 PicPay SMS       - R$0.65', callback_data='comprar_picpay'
         ),
         telebot.types.InlineKeyboardButton(
             '📡 Outros SMS        - R$0.90', callback_data='comprar_outros'
@@ -326,7 +315,6 @@ def handle_recharge_amount(m):
     uid = m.from_user.id
     amount = float(m.text)
     PENDING_RECHARGE.pop(uid, None)
-
     pref = mp_client.preference().create({
         "items": [{"title": "Recarga de saldo", "quantity": 1, "unit_price": amount}],
         "external_reference": f"{uid}:{amount}",
@@ -415,14 +403,28 @@ def menu_refer(c):
 def cb_comprar(c):
     user_id, key = c.from_user.id, c.data.split('_')[1]
     criar_usuario(user_id)
-    prices = {'mercado':0.75, 'china':0.6, 'outros':0.90}
-    names  = {'mercado':'Mercado Pago SMS', 'china':'SMS para China', 'outros':'Outros SMS'}
-    idsms  = {'mercado':'cq', 'china':'ev', 'outros':'ot'}
+    prices = {
+        'mercado':0.75,
+        'china':0.6,
+        'picpay':0.65,   # NOVO SERVIÇO
+        'outros':0.90
+    }
+    names  = {
+        'mercado':'Mercado Pago SMS',
+        'china':'SMS para China',
+        'picpay':'PicPay SMS',
+        'outros':'Outros SMS'
+    }
+    idsms  = {
+        'mercado':'cq',
+        'china':'ev',
+        'picpay':'ev',   # Usa ev igual China
+        'outros':'ot'
+    }
     balance = carregar_usuarios()[str(user_id)]['saldo']
     price, service = prices[key], names[key]
     if balance < price:
         return bot.answer_callback_query(c.id, '❌ Saldo insuficiente.', True)
-
     bot.edit_message_text(
         '⏳ Solicitando número...',
         c.message.chat.id,
@@ -435,14 +437,11 @@ def cb_comprar(c):
             break
     if resp.get('status') != 'success':
         return bot.send_message(c.message.chat.id, '🚫 Sem números disponíveis.')
-
     aid   = resp['id']
     full  = resp['number']
     short = full[2:] if full.startswith('55') else full
     adicionar_numero(user_id, aid)
     alterar_saldo(user_id, balance - price)
-
-    # keyboards
     kb_blocked = telebot.types.InlineKeyboardMarkup()
     kb_blocked.row(
         telebot.types.InlineKeyboardButton(
@@ -457,7 +456,6 @@ def cb_comprar(c):
             '📜 Menu', callback_data='menu'
         )
     )
-
     kb_unlocked = telebot.types.InlineKeyboardMarkup()
     kb_unlocked.row(
         telebot.types.InlineKeyboardButton(
@@ -472,7 +470,6 @@ def cb_comprar(c):
             '📜 Menu', callback_data='menu'
         )
     )
-
     text = (
         f"📦 {service}\n"
         f"☎️ Número: `{full}`\n"
@@ -486,7 +483,6 @@ def cb_comprar(c):
         parse_mode='Markdown',
         reply_markup=kb_blocked
     )
-
     status_map[aid] = {
         'user_id':    user_id,
         'price':      price,
@@ -496,9 +492,7 @@ def cb_comprar(c):
         'full':       full,
         'short':      short
     }
-
     spawn_sms_thread(aid)
-
     def countdown():
         for minute in range(PRAZO_MINUTOS):
             time.sleep(60)
@@ -524,7 +518,6 @@ def cb_comprar(c):
                 )
             except:
                 pass
-
     def auto_cancel():
         time.sleep(PRAZO_SEGUNDOS)
         info = status_map.get(aid)
@@ -538,7 +531,6 @@ def cb_comprar(c):
                 bot.delete_message(info['chat_id'], info['message_id'])
             except:
                 pass
-
     threading.Thread(target=countdown, daemon=True).start()
     threading.Thread(target=auto_cancel, daemon=True).start()
 
@@ -578,7 +570,6 @@ def cancelar_user(c):
         pass
     bot.answer_callback_query(c.id, '✅ Cancelado e saldo devolvido.', show_alert=True)
 
-# === WEBHOOKS ===
 @app.route('/', methods=['GET'])
 def health():
     return 'OK', 200
@@ -605,12 +596,11 @@ def mp_webhook():
                     amt = float(amt_str)
                     u = carregar_usuarios()
                     current = u.get(str(uid), {}).get('saldo', 0.0)
-                    # Bônus referência
                     refid = u.get(str(uid), {}).get("refer")
                     if refid and str(refid) in u:
                         bonus = round(amt * 0.10, 2)
                         u[str(refid)]["saldo"] += bonus
-                        salvar_usuarios(u)  # <-- isso salva o saldo no arquivo E faz backup!
+                        salvar_usuarios(u)
                         try:
                             bot.send_message(
                                 int(refid),

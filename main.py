@@ -25,10 +25,13 @@ MP_ACCESS_TOKEN   = os.getenv("MP_ACCESS_TOKEN")
 SITE_URL          = os.getenv("SITE_URL").rstrip('/')
 BACKUP_BOT_TOKEN  = '7982928818:AAEPf9AgnSEqEL7Ay5UaMPyG27h59PdGUYs'
 BACKUP_CHAT_ID    = '6829680279'
+ALERTA_DEPOSITO_BOT_TOKEN = '8011035929:AAHpztTqqAXaQ-2cQb23qklZIX4k0vVM2Uk'
+ALERTA_DEPOSITO_CHAT_ID = '6829680279'
 
 bot         = telebot.TeleBot(BOT_TOKEN, threaded=False)
 alert_bot   = telebot.TeleBot(ALERT_BOT_TOKEN)
 backup_bot  = telebot.TeleBot(BACKUP_BOT_TOKEN)
+alerta_deposito_bot = telebot.TeleBot(ALERTA_DEPOSITO_BOT_TOKEN)
 mp_client   = mercadopago.SDK(MP_ACCESS_TOKEN)
 
 app = Flask(__name__)
@@ -182,11 +185,12 @@ def spawn_sms_thread(aid):
                 time.sleep(5)
                 continue
             if status == 'STATUS_CANCEL':
-                if not info['codes']:
+                if not info['codes'] and not info.get('refunded'):
                     alterar_saldo(
                         info['user_id'],
                         carregar_usuarios()[str(info['user_id'])]['saldo'] + info['price']
                     )
+                    info['refunded'] = True
                     bot.send_message(
                         chat_id,
                         f"❌ Cancelado pelo provider. R${info['price']:.2f} devolvido."
@@ -470,6 +474,16 @@ def cb_comprar(c):
             '📜 Menu', callback_data='menu'
         )
     )
+    status_map[aid] = {
+        'user_id':    user_id,
+        'price':      price,
+        'chat_id':    msg.chat.id,
+        'message_id': msg.message_id,
+        'service':    service,
+        'full':       full,
+        'short':      short,
+        'refunded':   False
+    }
     text = (
         f"📦 {service}\n"
         f"☎️ Número: `{full}`\n"
@@ -483,15 +497,10 @@ def cb_comprar(c):
         parse_mode='Markdown',
         reply_markup=kb_blocked
     )
-    status_map[aid] = {
-        'user_id':    user_id,
-        'price':      price,
+    status_map[aid].update({
         'chat_id':    msg.chat.id,
         'message_id': msg.message_id,
-        'service':    service,
-        'full':       full,
-        'short':      short
-    }
+    })
     spawn_sms_thread(aid)
     def countdown():
         for minute in range(PRAZO_MINUTOS):
@@ -521,12 +530,13 @@ def cb_comprar(c):
     def auto_cancel():
         time.sleep(PRAZO_SEGUNDOS)
         info = status_map.get(aid)
-        if info and not info.get('codes') and not info.get('canceled_by_user'):
+        if info and not info.get('codes') and not info.get('canceled_by_user') and not info.get('refunded'):
             cancelar_numero(aid)
             alterar_saldo(
                 info['user_id'],
                 carregar_usuarios()[str(info['user_id'])]['saldo'] + info['price']
             )
+            info['refunded'] = True
             try:
                 bot.delete_message(info['chat_id'], info['message_id'])
             except:
@@ -556,7 +566,7 @@ def cancel_blocked(c):
 def cancelar_user(c):
     aid = c.data.split('_', 1)[1]
     info = status_map.get(aid)
-    if not info or info.get('codes'):
+    if not info or info.get('codes') or info.get('refunded'):
         return bot.answer_callback_query(c.id, '❌ Não pode cancelar após receber SMS.', True)
     info['canceled_by_user'] = True
     cancelar_numero(aid)
@@ -564,6 +574,7 @@ def cancelar_user(c):
         info['user_id'],
         carregar_usuarios()[str(info['user_id'])]['saldo'] + info['price']
     )
+    info['refunded'] = True
     try:
         bot.delete_message(info['chat_id'], info['message_id'])
     except:
@@ -613,6 +624,19 @@ def mp_webhook():
                         uid,
                         f"✅ Recarga de R$ {amt:.2f} confirmada! Seu novo saldo é R$ {current + amt:.2f}"
                     )
+                    # ALERTA DE DEPÓSITO EM OUTRO BOT
+                    try:
+                        alerta_deposito_bot.send_message(
+                            ALERTA_DEPOSITO_CHAT_ID,
+                            f"💵 *Novo depósito confirmado*\n"
+                            f"Usuário: `{uid}`\n"
+                            f"Valor: R$ {amt:.2f}\n"
+                            f"Saldo novo: R$ {current + amt:.2f}\n"
+                            f"Data/hora: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}",
+                            parse_mode='Markdown'
+                        )
+                    except Exception as e:
+                        logger.error(f"Erro ao avisar alerta_deposito_bot: {e}")
                 except Exception as e:
                     logger.error(f"Erro external_reference: {e}")
     return '', 200

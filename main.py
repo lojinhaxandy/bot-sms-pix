@@ -25,13 +25,13 @@ MP_ACCESS_TOKEN   = os.getenv("MP_ACCESS_TOKEN")
 SITE_URL          = os.getenv("SITE_URL").rstrip('/')
 BACKUP_BOT_TOKEN  = '7982928818:AAEPf9AgnSEqEL7Ay5UaMPyG27h59PdGUYs'
 BACKUP_CHAT_ID    = '6829680279'
-ALERTA_DEPOSITO_BOT_TOKEN = '8011035929:AAHpztTqqAXaQ-2cQb23qklZIX4k0vVM2Uk'
-ALERTA_DEPOSITO_CHAT_ID = '6829680279'
+ADMIN_BOT_TOKEN   = '8011035929:AAHpztTqqAXaQ-2cQb23qklZIX4k0vVM2Uk'
+ADMIN_CHAT_ID     = '6829680279'
 
 bot         = telebot.TeleBot(BOT_TOKEN, threaded=False)
 alert_bot   = telebot.TeleBot(ALERT_BOT_TOKEN)
 backup_bot  = telebot.TeleBot(BACKUP_BOT_TOKEN)
-alerta_deposito_bot = telebot.TeleBot(ALERTA_DEPOSITO_BOT_TOKEN)
+admin_bot   = telebot.TeleBot(ADMIN_BOT_TOKEN)
 mp_client   = mercadopago.SDK(MP_ACCESS_TOKEN)
 
 app = Flask(__name__)
@@ -185,12 +185,11 @@ def spawn_sms_thread(aid):
                 time.sleep(5)
                 continue
             if status == 'STATUS_CANCEL':
-                if not info['codes'] and not info.get('refunded'):
+                if not info['codes']:
                     alterar_saldo(
                         info['user_id'],
                         carregar_usuarios()[str(info['user_id'])]['saldo'] + info['price']
                     )
-                    info['refunded'] = True
                     bot.send_message(
                         chat_id,
                         f"❌ Cancelado pelo provider. R${info['price']:.2f} devolvido."
@@ -223,19 +222,26 @@ def spawn_sms_thread(aid):
                         '📜 Menu', callback_data='menu'
                     )
                 )
-                if msg_id:
-                    bot.edit_message_text(
-                        text, chat_id, msg_id,
-                        parse_mode='Markdown',
-                        reply_markup=kb
-                    )
-                else:
-                    m = bot.send_message(
-                        chat_id, text,
-                        parse_mode='Markdown',
-                        reply_markup=kb
-                    )
-                    info['sms_message_id'] = m.message_id
+                # Corrige erro message is not modified
+                try:
+                    if msg_id:
+                        bot.edit_message_text(
+                            text, chat_id, msg_id,
+                            parse_mode='Markdown',
+                            reply_markup=kb
+                        )
+                    else:
+                        m = bot.send_message(
+                            chat_id, text,
+                            parse_mode='Markdown',
+                            reply_markup=kb
+                        )
+                        info['sms_message_id'] = m.message_id
+                except telebot.apihelper.ApiTelegramException as e:
+                    if "message is not modified" not in str(e):
+                        raise
+                except Exception:
+                    pass
             time.sleep(5)
     threading.Thread(target=check_sms, daemon=True).start()
 
@@ -429,11 +435,17 @@ def cb_comprar(c):
     price, service = prices[key], names[key]
     if balance < price:
         return bot.answer_callback_query(c.id, '❌ Saldo insuficiente.', True)
-    bot.edit_message_text(
-        '⏳ Solicitando número...',
-        c.message.chat.id,
-        c.message.message_id
-    )
+    try:
+        bot.edit_message_text(
+            '⏳ Solicitando número...',
+            c.message.chat.id,
+            c.message.message_id
+        )
+    except telebot.apihelper.ApiTelegramException as e:
+        if "message is not modified" not in str(e):
+            raise
+    except Exception:
+        pass
     resp = {}
     for attempt in range(1, 14):
         resp = solicitar_numero(idsms[key], max_price=attempt)
@@ -474,16 +486,6 @@ def cb_comprar(c):
             '📜 Menu', callback_data='menu'
         )
     )
-    status_map[aid] = {
-        'user_id':    user_id,
-        'price':      price,
-        'chat_id':    msg.chat.id,
-        'message_id': msg.message_id,
-        'service':    service,
-        'full':       full,
-        'short':      short,
-        'refunded':   False
-    }
     text = (
         f"📦 {service}\n"
         f"☎️ Número: `{full}`\n"
@@ -497,10 +499,15 @@ def cb_comprar(c):
         parse_mode='Markdown',
         reply_markup=kb_blocked
     )
-    status_map[aid].update({
+    status_map[aid] = {
+        'user_id':    user_id,
+        'price':      price,
         'chat_id':    msg.chat.id,
         'message_id': msg.message_id,
-    })
+        'service':    service,
+        'full':       full,
+        'short':      short
+    }
     spawn_sms_thread(aid)
     def countdown():
         for minute in range(PRAZO_MINUTOS):
@@ -525,18 +532,20 @@ def cb_comprar(c):
                     parse_mode='Markdown',
                     reply_markup=kb_sel
                 )
-            except:
+            except telebot.apihelper.ApiTelegramException as e:
+                if "message is not modified" not in str(e):
+                    raise
+            except Exception:
                 pass
     def auto_cancel():
         time.sleep(PRAZO_SEGUNDOS)
         info = status_map.get(aid)
-        if info and not info.get('codes') and not info.get('canceled_by_user') and not info.get('refunded'):
+        if info and not info.get('codes') and not info.get('canceled_by_user'):
             cancelar_numero(aid)
             alterar_saldo(
                 info['user_id'],
                 carregar_usuarios()[str(info['user_id'])]['saldo'] + info['price']
             )
-            info['refunded'] = True
             try:
                 bot.delete_message(info['chat_id'], info['message_id'])
             except:
@@ -566,7 +575,8 @@ def cancel_blocked(c):
 def cancelar_user(c):
     aid = c.data.split('_', 1)[1]
     info = status_map.get(aid)
-    if not info or info.get('codes') or info.get('refunded'):
+    # Corrige bug saldo: só pode cancelar se não recebeu NENHUM código
+    if not info or info.get('codes'):
         return bot.answer_callback_query(c.id, '❌ Não pode cancelar após receber SMS.', True)
     info['canceled_by_user'] = True
     cancelar_numero(aid)
@@ -574,7 +584,6 @@ def cancelar_user(c):
         info['user_id'],
         carregar_usuarios()[str(info['user_id'])]['saldo'] + info['price']
     )
-    info['refunded'] = True
     try:
         bot.delete_message(info['chat_id'], info['message_id'])
     except:
@@ -608,6 +617,8 @@ def mp_webhook():
                     u = carregar_usuarios()
                     current = u.get(str(uid), {}).get('saldo', 0.0)
                     refid = u.get(str(uid), {}).get("refer")
+                    bonus = 0
+                    ref_text = ""
                     if refid and str(refid) in u:
                         bonus = round(amt * 0.10, 2)
                         u[str(refid)]["saldo"] += bonus
@@ -619,24 +630,20 @@ def mp_webhook():
                             )
                         except:
                             pass
+                        ref_text = f"\nIndicado por: {refid}\nBônus enviado: R$ {bonus:.2f}"
                     alterar_saldo(uid, current + amt)
                     bot.send_message(
                         uid,
                         f"✅ Recarga de R$ {amt:.2f} confirmada! Seu novo saldo é R$ {current + amt:.2f}"
                     )
-                    # ALERTA DE DEPÓSITO EM OUTRO BOT
+                    # Notifica no bot admin de depósito
                     try:
-                        alerta_deposito_bot.send_message(
-                            ALERTA_DEPOSITO_CHAT_ID,
-                            f"💵 *Novo depósito confirmado*\n"
-                            f"Usuário: `{uid}`\n"
-                            f"Valor: R$ {amt:.2f}\n"
-                            f"Saldo novo: R$ {current + amt:.2f}\n"
-                            f"Data/hora: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}",
-                            parse_mode='Markdown'
+                        admin_bot.send_message(
+                            ADMIN_CHAT_ID,
+                            f"💰 Novo DEPÓSITO\nUser: {uid}\nValor: R$ {amt:.2f}\nData: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}{ref_text}"
                         )
                     except Exception as e:
-                        logger.error(f"Erro ao avisar alerta_deposito_bot: {e}")
+                        logger.error(f"Erro envio admin recarga: {e}")
                 except Exception as e:
                     logger.error(f"Erro external_reference: {e}")
     return '', 200

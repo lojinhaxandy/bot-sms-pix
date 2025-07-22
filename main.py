@@ -6,13 +6,15 @@ import logging
 import requests
 import re
 import psycopg2
-import tempfile
+import psycopg2.extras
+
 from datetime import datetime
 from flask import Flask, request
+
 import telebot
 import mercadopago
 
-# === CONFIG ===
+# === CONFIGURAÇÃO VIA ENV ===
 BOT_TOKEN         = os.getenv("BOT_TOKEN")
 ALERT_BOT_TOKEN   = os.getenv("ALERT_BOT_TOKEN")
 ALERT_CHAT_ID     = os.getenv("ALERT_CHAT_ID")
@@ -21,11 +23,11 @@ SMSBOWER_URL      = "https://smsbower.online/stubs/handler_api.php"
 COUNTRY_ID        = "73"
 MP_ACCESS_TOKEN   = os.getenv("MP_ACCESS_TOKEN")
 SITE_URL          = os.getenv("SITE_URL").rstrip('/')
-BACKUP_BOT_TOKEN  = '7982928818:AAEPf9AgnSEqEL7Ay5UaMPyG27h59PdGUYs'
-BACKUP_CHAT_ID    = '6829680279'
-ADMIN_BOT_TOKEN   = '8011035929:AAHpztTqqAXaQ-2cQb23qklZIX4k0vVM2Uk'
-ADMIN_CHAT_ID     = '6829680279'
-DATABASE_URL      = os.getenv("DATABASE_URL")  # postgresql://user:pass@host:port/db
+BACKUP_BOT_TOKEN  = os.getenv("BACKUP_BOT_TOKEN") or '7982928818:AAEPf9AgnSEqEL7Ay5UaMPyG27h59PdGUYs'
+BACKUP_CHAT_ID    = os.getenv("BACKUP_CHAT_ID") or '6829680279'
+ADMIN_BOT_TOKEN   = os.getenv("ADMIN_BOT_TOKEN") or '8011035929:AAHpztTqqAXaQ-2cQb23qklZIX4k0vVM2Uk'
+ADMIN_CHAT_ID     = os.getenv("ADMIN_CHAT_ID") or '6829680279'
+DATABASE_URL      = os.getenv("DATABASE_URL")
 
 bot         = telebot.TeleBot(BOT_TOKEN, threaded=False)
 alert_bot   = telebot.TeleBot(ALERT_BOT_TOKEN)
@@ -35,35 +37,16 @@ mp_client   = mercadopago.SDK(MP_ACCESS_TOKEN)
 
 app = Flask(__name__)
 
-def get_conn():
-    return psycopg2.connect(DATABASE_URL, sslmode='require')
-
-def init_db():
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute('''
-            CREATE TABLE IF NOT EXISTS usuarios (
-                id BIGINT PRIMARY KEY,
-                saldo NUMERIC(20,2) NOT NULL DEFAULT 0,
-                numeros TEXT[],
-                refer BIGINT,
-                indicados TEXT[]
-            )
-        ''')
-        conn.commit()
-
-def to_pg_array(lst):
-    if not lst: return '{}'
-    return '{' + ','.join(map(str, lst)) + '}'
-def from_pg_array(arr):
-    if not arr or arr == '{}': return []
-    return [x for x in arr[1:-1].split(',') if x]
+def get_db_conn():
+    return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
 
 class TelegramLogHandler(logging.Handler):
     def emit(self, record):
         msg = self.format(record)
-        try: alert_bot.send_message(ALERT_CHAT_ID, msg)
-        except: pass
+        try:
+            alert_bot.send_message(ALERT_CHAT_ID, msg)
+        except:
+            pass
 
 logger = logging.getLogger("bot_sms")
 logger.setLevel(logging.INFO)
@@ -78,87 +61,92 @@ PENDING_RECHARGE = {}
 PRAZO_MINUTOS    = 23
 PRAZO_SEGUNDOS   = PRAZO_MINUTOS * 60
 
+# CRUD BANCO (usuários)
 def carregar_usuario(uid):
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute('SELECT id, saldo, numeros, refer, indicados FROM usuarios WHERE id=%s', (uid,))
-        row = cur.fetchone()
-        if row:
-            return {
-                "id": row[0],
-                "saldo": float(row[1]),
-                "numeros": from_pg_array(row[2]),
-                "refer": str(row[3]) if row[3] else None,
-                "indicados": from_pg_array(row[4])
-            }
-        else:
-            return None
+    with get_db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM usuarios WHERE id=%s", (uid,))
+            user = cur.fetchone()
+            if not user:
+                return None
+            user['numeros'] = json.loads(user['numeros'])
+            user['indicados'] = json.loads(user.get('indicados', '[]'))
+            return user
 
 def salvar_usuario(user):
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute('''
-            INSERT INTO usuarios (id, saldo, numeros, refer, indicados)
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (id) DO UPDATE SET
-                saldo=EXCLUDED.saldo,
-                numeros=EXCLUDED.numeros,
-                refer=EXCLUDED.refer,
-                indicados=EXCLUDED.indicados
-        ''', (
-            int(user["id"]),
-            float(user["saldo"]),
-            to_pg_array(user["numeros"]),
-            int(user["refer"]) if user.get("refer") else None,
-            to_pg_array(user.get("indicados", []))
-        ))
-        conn.commit()
+    with get_db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE usuarios SET saldo=%s, numeros=%s, refer=%s, indicados=%s WHERE id=%s
+            """, (
+                user['saldo'],
+                json.dumps(user['numeros']),
+                user.get('refer'),
+                json.dumps(user.get('indicados', [])),
+                user['id']
+            ))
+            conn.commit()
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.sql') as tmpf:
-            tmpname = tmpf.name
-        os.system(f'pg_dump --dbname="{DATABASE_URL}" > {tmpname}')
-        with open(tmpname, 'rb') as bf:
-            backup_bot.send_document(BACKUP_CHAT_ID, bf)
-        os.unlink(tmpname)
+        exportar_backup_json()
     except Exception as e:
         logger.error(f"Erro ao enviar backup: {e}")
 
 def criar_usuario(uid, refer=None):
-    user = carregar_usuario(uid)
-    if not user:
-        user = {"id": int(uid), "saldo": 0.0, "numeros": [], "indicados": []}
-        if refer and str(refer) != str(uid):
-            ruser = carregar_usuario(refer)
-            if ruser:
-                user["refer"] = str(refer)
-                indicados = ruser.get("indicados", [])
-                if str(uid) not in indicados:
-                    indicados.append(str(uid))
-                ruser["indicados"] = indicados
-                salvar_usuario(ruser)
-        salvar_usuario(user)
-        logger.info(f"Novo usuário criado: {uid}")
+    with get_db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM usuarios WHERE id=%s", (uid,))
+            if cur.fetchone():
+                return
+            cur.execute("""
+                INSERT INTO usuarios (id, saldo, numeros, refer, indicados)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (uid, 0.0, json.dumps([]), refer, json.dumps([])))
+            conn.commit()
+            logger.info(f"Novo usuário criado: {uid}")
+            # Indicação
+            if refer and str(refer) != str(uid):
+                cur.execute("SELECT indicados FROM usuarios WHERE id=%s", (refer,))
+                result = cur.fetchone()
+                if result:
+                    indicados = json.loads(result['indicados'] or "[]")
+                    if str(uid) not in indicados:
+                        indicados.append(str(uid))
+                        cur.execute("UPDATE usuarios SET indicados=%s WHERE id=%s", (json.dumps(indicados), refer))
+                        conn.commit()
 
 def alterar_saldo(uid, novo):
     user = carregar_usuario(uid)
     if not user:
-        user = {"id": int(uid), "saldo": 0.0, "numeros": []}
-    user["saldo"] = novo
+        return
+    user['saldo'] = novo
     salvar_usuario(user)
     logger.info(f"Saldo de {uid} = R$ {novo:.2f}")
 
 def adicionar_numero(uid, aid):
     user = carregar_usuario(uid)
     if not user:
-        user = {"id": int(uid), "saldo": 0.0, "numeros": []}
-    if aid not in user["numeros"]:
-        user["numeros"].append(aid)
+        return
+    if aid not in user['numeros']:
+        user['numeros'].append(aid)
         salvar_usuario(user)
         logger.info(f"Número {aid} adicionado a {uid}")
 
 def get_user_ref_link(uid):
     return f"https://t.me/{bot.get_me().username}?start={uid}"
 
+def exportar_backup_json():
+    with get_db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM usuarios")
+            users = cur.fetchall()
+            for u in users:
+                u['numeros'] = json.loads(u['numeros'])
+                u['indicados'] = json.loads(u.get('indicados', '[]'))
+            with open("usuarios_backup.json", "w") as f:
+                json.dump(users, f, indent=2, ensure_ascii=False)
+            with open("usuarios_backup.json", "rb") as bf:
+                backup_bot.send_document(BACKUP_CHAT_ID, bf)
+# ============ SMSBOWER ===============
 def solicitar_numero(servico, max_price=None):
     params = {
         'api_key': API_KEY_SMSBOWER,
@@ -185,12 +173,7 @@ def cancelar_numero(aid):
     try:
         requests.get(
             SMSBOWER_URL,
-            params={
-                'api_key': API_KEY_SMSBOWER,
-                'action': 'setStatus',
-                'status': '8',
-                'id': aid
-            },
+            params={'api_key':API_KEY_SMSBOWER, 'action':'setStatus','status':'8','id':aid},
             timeout=10
         )
         logger.info(f"Cancelado provider: {aid}")
@@ -201,11 +184,7 @@ def obter_status(aid):
     try:
         r = requests.get(
             SMSBOWER_URL,
-            params={
-                'api_key': API_KEY_SMSBOWER,
-                'action': 'getStatus',
-                'id': aid
-            },
+            params={'api_key':API_KEY_SMSBOWER,'action':'getStatus','id':aid},
             timeout=10
         )
         r.raise_for_status()
@@ -217,7 +196,8 @@ def obter_status(aid):
 def spawn_sms_thread(aid):
     with status_lock:
         info = status_map.get(aid)
-    if not info: return
+    if not info:
+        return
 
     service = info['service']
     full    = info['full']
@@ -226,7 +206,6 @@ def spawn_sms_thread(aid):
     msg_id  = info.get('sms_message_id')
     info.setdefault('codes', [])
     info['canceled_by_user'] = False
-    info['cancelando'] = False
 
     def check_sms():
         start = time.time()
@@ -239,14 +218,16 @@ def spawn_sms_thread(aid):
                 continue
             if status == 'STATUS_CANCEL':
                 if not info['codes']:
-                    alterar_saldo(
-                        info['user_id'],
-                        carregar_usuario(info['user_id'])['saldo'] + info['price']
-                    )
-                    bot.send_message(
-                        chat_id,
-                        f"❌ Cancelado pelo provider. R${info['price']:.2f} devolvido."
-                    )
+                    user = carregar_usuario(info['user_id'])
+                    if user:
+                        alterar_saldo(
+                            info['user_id'],
+                            user['saldo'] + info['price']
+                        )
+                        bot.send_message(
+                            chat_id,
+                            f"❌ Cancelado pelo provider. R${info['price']:.2f} devolvido."
+                        )
                 return
             code = status.split(':', 1)[1] if ':' in status else status
             if code not in info['codes']:
@@ -297,6 +278,7 @@ def spawn_sms_thread(aid):
             time.sleep(5)
     threading.Thread(target=check_sms, daemon=True).start()
 
+# =========== MENUS ===========
 def send_menu(chat_id):
     kb = telebot.types.InlineKeyboardMarkup(row_width=1)
     kb.add(
@@ -323,7 +305,10 @@ def send_menu(chat_id):
 
 @bot.callback_query_handler(lambda c: c.data == 'menu')
 def callback_menu(c):
-    bot.answer_callback_query(c.id)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
     send_menu(c.message.chat.id)
 
 def show_comprar_menu(chat_id):
@@ -343,7 +328,6 @@ def show_comprar_menu(chat_id):
         )
     )
     bot.send_message(chat_id, 'Escolha serviço:', reply_markup=kb)
-
 @bot.message_handler(commands=['start'])
 def cmd_start(m):
     refer = None
@@ -354,7 +338,10 @@ def cmd_start(m):
 
 @bot.callback_query_handler(lambda c: c.data == 'menu_comprar')
 def callback_menu_comprar(c):
-    bot.answer_callback_query(c.id)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
     show_comprar_menu(c.message.chat.id)
 
 @bot.message_handler(commands=['comprar'])
@@ -364,7 +351,10 @@ def cmd_comprar(m):
 
 @bot.callback_query_handler(lambda c: c.data == 'menu_recarregar')
 def menu_recarregar(c):
-    bot.answer_callback_query(c.id)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
     criar_usuario(c.from_user.id)
     PENDING_RECHARGE[c.from_user.id] = True
     bot.send_message(
@@ -411,7 +401,10 @@ def handle_recharge_amount(m):
 
 @bot.callback_query_handler(lambda c: c.data == 'menu_saldo')
 def menu_saldo(c):
-    bot.answer_callback_query(c.id)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
     criar_usuario(c.from_user.id)
     s = carregar_usuario(c.from_user.id)['saldo']
     bot.send_message(c.message.chat.id, f"💰 Saldo: R$ {s:.2f}")
@@ -419,7 +412,10 @@ def menu_saldo(c):
 
 @bot.callback_query_handler(lambda c: c.data == 'menu_numeros')
 def menu_numeros(c):
-    bot.answer_callback_query(c.id)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
     criar_usuario(c.from_user.id)
     nums = carregar_usuario(c.from_user.id)['numeros']
     if not nums:
@@ -439,8 +435,10 @@ def menu_numeros(c):
 
 @bot.callback_query_handler(lambda c: c.data == 'menu_refer')
 def menu_refer(c):
-    bot.answer_callback_query(c.id)
-    criar_usuario(c.from_user.id)
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
     u = carregar_usuario(c.from_user.id)
     link = get_user_ref_link(c.from_user.id)
     indicados = u.get("indicados", [])
@@ -452,7 +450,10 @@ def menu_refer(c):
     if indicados:
         nomes = []
         for id_ in indicados:
-            nomes.append(f"- {id_}")
+            try:
+                nomes.append(f"- {id_}")
+            except:
+                nomes.append(f"- {id_}")
         text += "\n" + "\n".join(nomes)
     bot.send_message(c.message.chat.id, text, parse_mode='Markdown')
     send_menu(c.message.chat.id)
@@ -590,10 +591,12 @@ def cb_comprar(c):
         info = status_map.get(aid)
         if info and not info.get('codes') and not info.get('canceled_by_user'):
             cancelar_numero(aid)
-            alterar_saldo(
-                info['user_id'],
-                carregar_usuario(info['user_id'])['saldo'] + info['price']
-            )
+            user = carregar_usuario(info['user_id'])
+            if user:
+                alterar_saldo(
+                    info['user_id'],
+                    user['saldo'] + info['price']
+                )
             try:
                 bot.delete_message(info['chat_id'], info['message_id'])
             except:
@@ -623,22 +626,26 @@ def cancel_blocked(c):
 def cancelar_user(c):
     aid = c.data.split('_', 1)[1]
     info = status_map.get(aid)
+    # Corrige bug saldo: só pode cancelar se não recebeu NENHUM código
     if not info or info.get('codes'):
         return bot.answer_callback_query(c.id, '❌ Não pode cancelar após receber SMS.', True)
-    if info.get('cancelando', False):
-        return bot.answer_callback_query(c.id, '⏳ Cancelamento já em andamento.', True)
-    info['cancelando'] = True
+    if info.get('canceled_by_user'):
+        return bot.answer_callback_query(c.id, '❌ Já cancelado.', True)
     info['canceled_by_user'] = True
     cancelar_numero(aid)
-    alterar_saldo(
-        info['user_id'],
-        carregar_usuario(info['user_id'])['saldo'] + info['price']
-    )
+    user = carregar_usuario(info['user_id'])
+    if user:
+        alterar_saldo(
+            info['user_id'],
+            user['saldo'] + info['price']
+        )
     try:
         bot.delete_message(info['chat_id'], info['message_id'])
     except:
         pass
     bot.answer_callback_query(c.id, '✅ Cancelado e saldo devolvido.', show_alert=True)
+
+# =============== FLASK APP ===============
 
 @app.route('/', methods=['GET'])
 def health():
@@ -664,42 +671,43 @@ def mp_webhook():
                 try:
                     uid = int(uid_str)
                     amt = float(amt_str)
-                    u = carregar_usuario(uid)
-                    current = u.get('saldo', 0.0) if u else 0.0
-                    refid = u.get("refer") if u else None
-                    bonus = 0
-                    ref_text = ""
-                    if refid and carregar_usuario(refid):
-                        ref_user = carregar_usuario(refid)
-                        bonus = round(amt * 0.10, 2)
-                        ref_user["saldo"] += bonus
-                        salvar_usuario(ref_user)
-                        try:
-                            bot.send_message(
-                                int(refid),
-                                f"🎉 Você ganhou R$ {bonus:.2f} de bônus pois seu indicado recarregou saldo!"
-                            )
-                        except:
-                            pass
-                        ref_text = f"\nIndicado por: {refid}\nBônus enviado: R$ {bonus:.2f}"
-                    alterar_saldo(uid, current + amt)
-                    bot.send_message(
-                        uid,
-                        f"✅ Recarga de R$ {amt:.2f} confirmada! Seu novo saldo é R$ {current + amt:.2f}"
-                    )
-                    try:
-                        admin_bot.send_message(
-                            ADMIN_CHAT_ID,
-                            f"💰 Novo DEPÓSITO\nUser: {uid}\nValor: R$ {amt:.2f}\nData: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}{ref_text}"
+                    user = carregar_usuario(uid)
+                    if user:
+                        current = user.get('saldo', 0.0)
+                        refid = user.get("refer")
+                        bonus = 0
+                        ref_text = ""
+                        if refid:
+                            ref_user = carregar_usuario(refid)
+                            if ref_user:
+                                bonus = round(amt * 0.10, 2)
+                                alterar_saldo(refid, ref_user['saldo'] + bonus)
+                                try:
+                                    bot.send_message(
+                                        int(refid),
+                                        f"🎉 Você ganhou R$ {bonus:.2f} de bônus pois seu indicado recarregou saldo!"
+                                    )
+                                except:
+                                    pass
+                                ref_text = f"\nIndicado por: {refid}\nBônus enviado: R$ {bonus:.2f}"
+                        alterar_saldo(uid, current + amt)
+                        bot.send_message(
+                            uid,
+                            f"✅ Recarga de R$ {amt:.2f} confirmada! Seu novo saldo é R$ {current + amt:.2f}"
                         )
-                    except Exception as e:
-                        logger.error(f"Erro envio admin recarga: {e}")
+                        # Notifica no bot admin de depósito
+                        try:
+                            admin_bot.send_message(
+                                ADMIN_CHAT_ID,
+                                f"💰 Novo DEPÓSITO\nUser: {uid}\nValor: R$ {amt:.2f}\nData: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}{ref_text}"
+                            )
+                        except Exception as e:
+                            logger.error(f"Erro envio admin recarga: {e}")
                 except Exception as e:
                     logger.error(f"Erro external_reference: {e}")
     return '', 200
 
 if __name__ == '__main__':
-    init_db()
     bot.remove_webhook()
     bot.set_webhook(f"{SITE_URL}/webhook/telegram")
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))

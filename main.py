@@ -65,7 +65,7 @@ PRAZO_SEGUNDOS   = PRAZO_MINUTOS * 60
 def carregar_usuario(uid):
     with get_db_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM usuarios WHERE id=%s", (uid,))
+            cur.execute("SELECT * FROM usuarios WHERE id=%s", (str(uid),))
             user = cur.fetchone()
             if not user:
                 return None
@@ -81,9 +81,9 @@ def salvar_usuario(user):
             """, (
                 user['saldo'],
                 json.dumps(user['numeros']),
-                user.get('refer'),
+                str(user.get('refer')) if user.get('refer') is not None else None,
                 json.dumps(user.get('indicados', [])),
-                user['id']
+                str(user['id'])
             ))
             conn.commit()
     try:
@@ -94,24 +94,24 @@ def salvar_usuario(user):
 def criar_usuario(uid, refer=None):
     with get_db_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT id FROM usuarios WHERE id=%s", (uid,))
+            cur.execute("SELECT id FROM usuarios WHERE id=%s", (str(uid),))
             if cur.fetchone():
                 return
             cur.execute("""
                 INSERT INTO usuarios (id, saldo, numeros, refer, indicados)
                 VALUES (%s, %s, %s, %s, %s)
-            """, (uid, 0.0, json.dumps([]), refer, json.dumps([])))
+            """, (str(uid), 0.0, json.dumps([]), str(refer) if refer else None, json.dumps([])))
             conn.commit()
             logger.info(f"Novo usuário criado: {uid}")
             # Indicação
             if refer and str(refer) != str(uid):
-                cur.execute("SELECT indicados FROM usuarios WHERE id=%s", (refer,))
+                cur.execute("SELECT indicados FROM usuarios WHERE id=%s", (str(refer),))
                 result = cur.fetchone()
                 if result:
                     indicados = json.loads(result['indicados'] or "[]")
                     if str(uid) not in indicados:
                         indicados.append(str(uid))
-                        cur.execute("UPDATE usuarios SET indicados=%s WHERE id=%s", (json.dumps(indicados), refer))
+                        cur.execute("UPDATE usuarios SET indicados=%s WHERE id=%s", (json.dumps(indicados), str(refer)))
                         conn.commit()
 
 def alterar_saldo(uid, novo):
@@ -142,7 +142,7 @@ def exportar_backup_json():
             for u in users:
                 u['numeros'] = json.loads(u['numeros'])
                 u['indicados'] = json.loads(u.get('indicados', '[]'))
-            with open("usuarios_backup.json", "w") as f:
+            with open("usuarios_backup.json", "w", encoding='utf-8') as f:
                 json.dump(users, f, indent=2, ensure_ascii=False)
             with open("usuarios_backup.json", "rb") as bf:
                 backup_bot.send_document(BACKUP_CHAT_ID, bf)
@@ -328,6 +328,7 @@ def show_comprar_menu(chat_id):
         )
     )
     bot.send_message(chat_id, 'Escolha serviço:', reply_markup=kb)
+
 @bot.message_handler(commands=['start'])
 def cmd_start(m):
     refer = None

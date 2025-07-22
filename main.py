@@ -1,5 +1,3 @@
-# app.py
-
 import os
 import json
 import threading
@@ -7,14 +5,14 @@ import time
 import logging
 import requests
 import re
-
+import psycopg2
+import tempfile
 from datetime import datetime
 from flask import Flask, request
-
 import telebot
 import mercadopago
 
-# === CONFIGURAÇÃO VIA ENV ===
+# === CONFIG ===
 BOT_TOKEN         = os.getenv("BOT_TOKEN")
 ALERT_BOT_TOKEN   = os.getenv("ALERT_BOT_TOKEN")
 ALERT_CHAT_ID     = os.getenv("ALERT_CHAT_ID")
@@ -27,6 +25,7 @@ BACKUP_BOT_TOKEN  = '7982928818:AAEPf9AgnSEqEL7Ay5UaMPyG27h59PdGUYs'
 BACKUP_CHAT_ID    = '6829680279'
 ADMIN_BOT_TOKEN   = '8011035929:AAHpztTqqAXaQ-2cQb23qklZIX4k0vVM2Uk'
 ADMIN_CHAT_ID     = '6829680279'
+DATABASE_URL      = os.getenv("DATABASE_URL")  # postgresql://user:pass@host:port/db
 
 bot         = telebot.TeleBot(BOT_TOKEN, threaded=False)
 alert_bot   = telebot.TeleBot(ALERT_BOT_TOKEN)
@@ -36,13 +35,35 @@ mp_client   = mercadopago.SDK(MP_ACCESS_TOKEN)
 
 app = Flask(__name__)
 
+def get_conn():
+    return psycopg2.connect(DATABASE_URL, sslmode='require')
+
+def init_db():
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS usuarios (
+                id BIGINT PRIMARY KEY,
+                saldo NUMERIC(20,2) NOT NULL DEFAULT 0,
+                numeros TEXT[],
+                refer BIGINT,
+                indicados TEXT[]
+            )
+        ''')
+        conn.commit()
+
+def to_pg_array(lst):
+    if not lst: return '{}'
+    return '{' + ','.join(map(str, lst)) + '}'
+def from_pg_array(arr):
+    if not arr or arr == '{}': return []
+    return [x for x in arr[1:-1].split(',') if x]
+
 class TelegramLogHandler(logging.Handler):
     def emit(self, record):
         msg = self.format(record)
-        try:
-            alert_bot.send_message(ALERT_CHAT_ID, msg)
-        except:
-            pass
+        try: alert_bot.send_message(ALERT_CHAT_ID, msg)
+        except: pass
 
 logger = logging.getLogger("bot_sms")
 logger.setLevel(logging.INFO)
@@ -50,7 +71,6 @@ handler = TelegramLogHandler()
 handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
 logger.addHandler(handler)
 
-USERS_FILE       = "usuarios.json"
 data_lock        = threading.Lock()
 status_lock      = threading.Lock()
 status_map       = {}
@@ -58,49 +78,82 @@ PENDING_RECHARGE = {}
 PRAZO_MINUTOS    = 23
 PRAZO_SEGUNDOS   = PRAZO_MINUTOS * 60
 
-def carregar_usuarios():
-    with data_lock:
-        if not os.path.exists(USERS_FILE):
-            with open(USERS_FILE, "w") as f:
-                json.dump({}, f)
-        with open(USERS_FILE, "r") as f:
-            return json.load(f)
+def carregar_usuario(uid):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute('SELECT id, saldo, numeros, refer, indicados FROM usuarios WHERE id=%s', (uid,))
+        row = cur.fetchone()
+        if row:
+            return {
+                "id": row[0],
+                "saldo": float(row[1]),
+                "numeros": from_pg_array(row[2]),
+                "refer": str(row[3]) if row[3] else None,
+                "indicados": from_pg_array(row[4])
+            }
+        else:
+            return None
 
-def salvar_usuarios(u):
-    with data_lock:
-        with open(USERS_FILE, "w") as f:
-            json.dump(u, f, indent=2)
+def salvar_usuario(user):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute('''
+            INSERT INTO usuarios (id, saldo, numeros, refer, indicados)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (id) DO UPDATE SET
+                saldo=EXCLUDED.saldo,
+                numeros=EXCLUDED.numeros,
+                refer=EXCLUDED.refer,
+                indicados=EXCLUDED.indicados
+        ''', (
+            int(user["id"]),
+            float(user["saldo"]),
+            to_pg_array(user["numeros"]),
+            int(user["refer"]) if user.get("refer") else None,
+            to_pg_array(user.get("indicados", []))
+        ))
+        conn.commit()
     try:
-        with open(USERS_FILE, 'rb') as bf:
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.sql') as tmpf:
+            tmpname = tmpf.name
+        os.system(f'pg_dump --dbname="{DATABASE_URL}" > {tmpname}')
+        with open(tmpname, 'rb') as bf:
             backup_bot.send_document(BACKUP_CHAT_ID, bf)
+        os.unlink(tmpname)
     except Exception as e:
         logger.error(f"Erro ao enviar backup: {e}")
 
 def criar_usuario(uid, refer=None):
-    u = carregar_usuarios()
-    if str(uid) not in u:
-        u[str(uid)] = {"saldo": 0.0, "numeros": []}
-        if refer and str(refer) != str(uid) and str(refer) in u:
-            u[str(uid)]["refer"] = str(refer)
-            if "indicados" not in u[str(refer)]:
-                u[str(refer)]["indicados"] = []
-            if str(uid) not in u[str(refer)]["indicados"]:
-                u[str(refer)]["indicados"].append(str(uid))
-        salvar_usuarios(u)
+    user = carregar_usuario(uid)
+    if not user:
+        user = {"id": int(uid), "saldo": 0.0, "numeros": [], "indicados": []}
+        if refer and str(refer) != str(uid):
+            ruser = carregar_usuario(refer)
+            if ruser:
+                user["refer"] = str(refer)
+                indicados = ruser.get("indicados", [])
+                if str(uid) not in indicados:
+                    indicados.append(str(uid))
+                ruser["indicados"] = indicados
+                salvar_usuario(ruser)
+        salvar_usuario(user)
         logger.info(f"Novo usuário criado: {uid}")
 
 def alterar_saldo(uid, novo):
-    u = carregar_usuarios()
-    u.setdefault(str(uid), {"saldo":0.0, "numeros":[]})["saldo"] = novo
-    salvar_usuarios(u)
+    user = carregar_usuario(uid)
+    if not user:
+        user = {"id": int(uid), "saldo": 0.0, "numeros": []}
+    user["saldo"] = novo
+    salvar_usuario(user)
     logger.info(f"Saldo de {uid} = R$ {novo:.2f}")
 
 def adicionar_numero(uid, aid):
-    u = carregar_usuarios()
-    user = u.setdefault(str(uid), {"saldo":0.0, "numeros":[]})
+    user = carregar_usuario(uid)
+    if not user:
+        user = {"id": int(uid), "saldo": 0.0, "numeros": []}
     if aid not in user["numeros"]:
         user["numeros"].append(aid)
-        salvar_usuarios(u)
+        salvar_usuario(user)
         logger.info(f"Número {aid} adicionado a {uid}")
 
 def get_user_ref_link(uid):
@@ -164,8 +217,7 @@ def obter_status(aid):
 def spawn_sms_thread(aid):
     with status_lock:
         info = status_map.get(aid)
-    if not info:
-        return
+    if not info: return
 
     service = info['service']
     full    = info['full']
@@ -174,6 +226,7 @@ def spawn_sms_thread(aid):
     msg_id  = info.get('sms_message_id')
     info.setdefault('codes', [])
     info['canceled_by_user'] = False
+    info['cancelando'] = False
 
     def check_sms():
         start = time.time()
@@ -188,7 +241,7 @@ def spawn_sms_thread(aid):
                 if not info['codes']:
                     alterar_saldo(
                         info['user_id'],
-                        carregar_usuarios()[str(info['user_id'])]['saldo'] + info['price']
+                        carregar_usuario(info['user_id'])['saldo'] + info['price']
                     )
                     bot.send_message(
                         chat_id,
@@ -222,7 +275,6 @@ def spawn_sms_thread(aid):
                         '📜 Menu', callback_data='menu'
                     )
                 )
-                # Corrige erro message is not modified
                 try:
                     if msg_id:
                         bot.edit_message_text(
@@ -361,7 +413,7 @@ def handle_recharge_amount(m):
 def menu_saldo(c):
     bot.answer_callback_query(c.id)
     criar_usuario(c.from_user.id)
-    s = carregar_usuarios()[str(c.from_user.id)]['saldo']
+    s = carregar_usuario(c.from_user.id)['saldo']
     bot.send_message(c.message.chat.id, f"💰 Saldo: R$ {s:.2f}")
     send_menu(c.message.chat.id)
 
@@ -369,7 +421,7 @@ def menu_saldo(c):
 def menu_numeros(c):
     bot.answer_callback_query(c.id)
     criar_usuario(c.from_user.id)
-    nums = carregar_usuarios()[str(c.from_user.id)]['numeros']
+    nums = carregar_usuario(c.from_user.id)['numeros']
     if not nums:
         bot.send_message(c.message.chat.id, '📭 Sem números ativos.')
     else:
@@ -389,10 +441,9 @@ def menu_numeros(c):
 def menu_refer(c):
     bot.answer_callback_query(c.id)
     criar_usuario(c.from_user.id)
-    u = carregar_usuarios()
-    user = u.get(str(c.from_user.id), {})
+    u = carregar_usuario(c.from_user.id)
     link = get_user_ref_link(c.from_user.id)
-    indicados = user.get("indicados", [])
+    indicados = u.get("indicados", [])
     text = (
         f"📢 *Indique amigos e ganhe 10% de todas as recargas deles!*\n\n"
         f"Seu link exclusivo:\n`{link}`\n\n"
@@ -401,10 +452,7 @@ def menu_refer(c):
     if indicados:
         nomes = []
         for id_ in indicados:
-            try:
-                nomes.append(f"- {id_}")
-            except:
-                nomes.append(f"- {id_}")
+            nomes.append(f"- {id_}")
         text += "\n" + "\n".join(nomes)
     bot.send_message(c.message.chat.id, text, parse_mode='Markdown')
     send_menu(c.message.chat.id)
@@ -416,7 +464,7 @@ def cb_comprar(c):
     prices = {
         'mercado':0.75,
         'china':0.6,
-        'picpay':0.65,   # NOVO SERVIÇO
+        'picpay':0.65,
         'outros':0.90
     }
     names  = {
@@ -428,10 +476,10 @@ def cb_comprar(c):
     idsms  = {
         'mercado':'cq',
         'china':'ev',
-        'picpay':'ev',   # Usa ev igual China
+        'picpay':'ev',
         'outros':'ot'
     }
-    balance = carregar_usuarios()[str(user_id)]['saldo']
+    balance = carregar_usuario(user_id)['saldo']
     price, service = prices[key], names[key]
     if balance < price:
         return bot.answer_callback_query(c.id, '❌ Saldo insuficiente.', True)
@@ -544,7 +592,7 @@ def cb_comprar(c):
             cancelar_numero(aid)
             alterar_saldo(
                 info['user_id'],
-                carregar_usuarios()[str(info['user_id'])]['saldo'] + info['price']
+                carregar_usuario(info['user_id'])['saldo'] + info['price']
             )
             try:
                 bot.delete_message(info['chat_id'], info['message_id'])
@@ -575,14 +623,16 @@ def cancel_blocked(c):
 def cancelar_user(c):
     aid = c.data.split('_', 1)[1]
     info = status_map.get(aid)
-    # Corrige bug saldo: só pode cancelar se não recebeu NENHUM código
     if not info or info.get('codes'):
         return bot.answer_callback_query(c.id, '❌ Não pode cancelar após receber SMS.', True)
+    if info.get('cancelando', False):
+        return bot.answer_callback_query(c.id, '⏳ Cancelamento já em andamento.', True)
+    info['cancelando'] = True
     info['canceled_by_user'] = True
     cancelar_numero(aid)
     alterar_saldo(
         info['user_id'],
-        carregar_usuarios()[str(info['user_id'])]['saldo'] + info['price']
+        carregar_usuario(info['user_id'])['saldo'] + info['price']
     )
     try:
         bot.delete_message(info['chat_id'], info['message_id'])
@@ -614,15 +664,16 @@ def mp_webhook():
                 try:
                     uid = int(uid_str)
                     amt = float(amt_str)
-                    u = carregar_usuarios()
-                    current = u.get(str(uid), {}).get('saldo', 0.0)
-                    refid = u.get(str(uid), {}).get("refer")
+                    u = carregar_usuario(uid)
+                    current = u.get('saldo', 0.0) if u else 0.0
+                    refid = u.get("refer") if u else None
                     bonus = 0
                     ref_text = ""
-                    if refid and str(refid) in u:
+                    if refid and carregar_usuario(refid):
+                        ref_user = carregar_usuario(refid)
                         bonus = round(amt * 0.10, 2)
-                        u[str(refid)]["saldo"] += bonus
-                        salvar_usuarios(u)
+                        ref_user["saldo"] += bonus
+                        salvar_usuario(ref_user)
                         try:
                             bot.send_message(
                                 int(refid),
@@ -636,7 +687,6 @@ def mp_webhook():
                         uid,
                         f"✅ Recarga de R$ {amt:.2f} confirmada! Seu novo saldo é R$ {current + amt:.2f}"
                     )
-                    # Notifica no bot admin de depósito
                     try:
                         admin_bot.send_message(
                             ADMIN_CHAT_ID,
@@ -649,6 +699,7 @@ def mp_webhook():
     return '', 200
 
 if __name__ == '__main__':
+    init_db()
     bot.remove_webhook()
     bot.set_webhook(f"{SITE_URL}/webhook/telegram")
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))

@@ -29,7 +29,7 @@ ADMIN_BOT_TOKEN   = os.getenv("ADMIN_BOT_TOKEN") or '8011035929:AAHpztTqqAXaQ-2c
 ADMIN_CHAT_ID     = os.getenv("ADMIN_CHAT_ID") or '6829680279'
 DATABASE_URL      = os.getenv("DATABASE_URL")
 
-bot         = telebot.TeleBot(BOT_TOKEN, threaded=False)
+bot         = telebot.TeleBot(BOT_TOKEN, threaded=True)
 alert_bot   = telebot.TeleBot(ALERT_BOT_TOKEN)
 backup_bot  = telebot.TeleBot(BACKUP_BOT_TOKEN)
 admin_bot   = telebot.TeleBot(ADMIN_BOT_TOKEN)
@@ -39,6 +39,22 @@ app = Flask(__name__)
 
 def get_db_conn():
     return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+
+# === Proteção: criar tabela de controle dos cancelamentos ===
+def criar_tabela_numeros_sms():
+    with get_db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS numeros_sms (
+                    aid TEXT PRIMARY KEY,
+                    user_id TEXT,
+                    price DOUBLE PRECISION,
+                    cancelado BOOLEAN DEFAULT FALSE,
+                    data_criacao TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            conn.commit()
+criar_tabela_numeros_sms()
 
 class TelegramLogHandler(logging.Handler):
     def emit(self, record):
@@ -81,7 +97,7 @@ def salvar_usuario(user):
             """, (
                 user['saldo'],
                 json.dumps(user['numeros']),
-                str(user.get('refer')) if user.get('refer') is not None else None,
+                user.get('refer'),
                 json.dumps(user.get('indicados', [])),
                 str(user['id'])
             ))
@@ -100,7 +116,7 @@ def criar_usuario(uid, refer=None):
             cur.execute("""
                 INSERT INTO usuarios (id, saldo, numeros, refer, indicados)
                 VALUES (%s, %s, %s, %s, %s)
-            """, (str(uid), 0.0, json.dumps([]), str(refer) if refer else None, json.dumps([])))
+            """, (str(uid), 0.0, json.dumps([]), refer, json.dumps([])))
             conn.commit()
             logger.info(f"Novo usuário criado: {uid}")
             # Indicação
@@ -142,10 +158,34 @@ def exportar_backup_json():
             for u in users:
                 u['numeros'] = json.loads(u['numeros'])
                 u['indicados'] = json.loads(u.get('indicados', '[]'))
-            with open("usuarios_backup.json", "w", encoding='utf-8') as f:
+            with open("usuarios_backup.json", "w") as f:
                 json.dump(users, f, indent=2, ensure_ascii=False)
             with open("usuarios_backup.json", "rb") as bf:
                 backup_bot.send_document(BACKUP_CHAT_ID, bf)
+
+# === Proteção: REGISTRO de número e controle de saldo cancelado ===
+def registrar_numero_sms(aid, user_id, price):
+    with get_db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO numeros_sms (aid, user_id, price, cancelado) VALUES (%s, %s, %s, FALSE) ON CONFLICT (aid) DO NOTHING",
+                (aid, str(user_id), price)
+            )
+            conn.commit()
+
+def marcar_cancelado_e_devolver(uid, aid):
+    with get_db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT cancelado, price FROM numeros_sms WHERE aid=%s FOR UPDATE", (aid,))
+            row = cur.fetchone()
+            if not row or row['cancelado']:
+                return False  # Já cancelado, não devolve nada!
+            price = row['price']
+            cur.execute("UPDATE numeros_sms SET cancelado=TRUE WHERE aid=%s", (aid,))
+            cur.execute("UPDATE usuarios SET saldo=saldo+%s WHERE id=%s", (price, str(uid)))
+            conn.commit()
+    return True
+
 # ============ SMSBOWER ===============
 def solicitar_numero(servico, max_price=None):
     params = {
@@ -218,12 +258,8 @@ def spawn_sms_thread(aid):
                 continue
             if status == 'STATUS_CANCEL':
                 if not info['codes']:
-                    user = carregar_usuario(info['user_id'])
-                    if user:
-                        alterar_saldo(
-                            info['user_id'],
-                            user['saldo'] + info['price']
-                        )
+                    ok = marcar_cancelado_e_devolver(info['user_id'], aid)
+                    if ok:
                         bot.send_message(
                             chat_id,
                             f"❌ Cancelado pelo provider. R${info['price']:.2f} devolvido."
@@ -507,6 +543,7 @@ def cb_comprar(c):
     full  = resp['number']
     short = full[2:] if full.startswith('55') else full
     adicionar_numero(user_id, aid)
+    registrar_numero_sms(aid, user_id, price)
     alterar_saldo(user_id, balance - price)
     kb_blocked = telebot.types.InlineKeyboardMarkup()
     kb_blocked.row(
@@ -592,16 +629,12 @@ def cb_comprar(c):
         info = status_map.get(aid)
         if info and not info.get('codes') and not info.get('canceled_by_user'):
             cancelar_numero(aid)
-            user = carregar_usuario(info['user_id'])
-            if user:
-                alterar_saldo(
-                    info['user_id'],
-                    user['saldo'] + info['price']
-                )
-            try:
-                bot.delete_message(info['chat_id'], info['message_id'])
-            except:
-                pass
+            ok = marcar_cancelado_e_devolver(info['user_id'], aid)
+            if ok:
+                try:
+                    bot.delete_message(info['chat_id'], info['message_id'])
+                except:
+                    pass
     threading.Thread(target=countdown, daemon=True).start()
     threading.Thread(target=auto_cancel, daemon=True).start()
 
@@ -627,24 +660,21 @@ def cancel_blocked(c):
 def cancelar_user(c):
     aid = c.data.split('_', 1)[1]
     info = status_map.get(aid)
-    # Corrige bug saldo: só pode cancelar se não recebeu NENHUM código
     if not info or info.get('codes'):
         return bot.answer_callback_query(c.id, '❌ Não pode cancelar após receber SMS.', True)
     if info.get('canceled_by_user'):
         return bot.answer_callback_query(c.id, '❌ Já cancelado.', True)
     info['canceled_by_user'] = True
     cancelar_numero(aid)
-    user = carregar_usuario(info['user_id'])
-    if user:
-        alterar_saldo(
-            info['user_id'],
-            user['saldo'] + info['price']
-        )
-    try:
-        bot.delete_message(info['chat_id'], info['message_id'])
-    except:
-        pass
-    bot.answer_callback_query(c.id, '✅ Cancelado e saldo devolvido.', show_alert=True)
+    ok = marcar_cancelado_e_devolver(info['user_id'], aid)
+    if ok:
+        try:
+            bot.delete_message(info['chat_id'], info['message_id'])
+        except:
+            pass
+        bot.answer_callback_query(c.id, '✅ Cancelado e saldo devolvido.', show_alert=True)
+    else:
+        bot.answer_callback_query(c.id, '❌ Já cancelado anteriormente.', show_alert=True)
 
 # =============== FLASK APP ===============
 

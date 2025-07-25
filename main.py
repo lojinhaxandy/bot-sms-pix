@@ -29,7 +29,7 @@ ADMIN_BOT_TOKEN   = os.getenv("ADMIN_BOT_TOKEN") or '8011035929:AAHpztTqqAXaQ-2c
 ADMIN_CHAT_ID     = os.getenv("ADMIN_CHAT_ID") or '6829680279'
 DATABASE_URL      = os.getenv("DATABASE_URL")
 
-bot         = telebot.TeleBot(BOT_TOKEN, threaded=True)
+bot         = telebot.TeleBot(BOT_TOKEN, threaded=False)
 alert_bot   = telebot.TeleBot(ALERT_BOT_TOKEN)
 backup_bot  = telebot.TeleBot(BACKUP_BOT_TOKEN)
 admin_bot   = telebot.TeleBot(ADMIN_BOT_TOKEN)
@@ -40,21 +40,22 @@ app = Flask(__name__)
 def get_db_conn():
     return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
 
-# === Proteção: criar tabela de controle dos cancelamentos ===
-def criar_tabela_numeros_sms():
+def descontar_saldo_atomic(uid, valor):
+    """
+    Tenta descontar saldo de forma transacional e segura.
+    Retorna: True se descontou, False se saldo insuficiente.
+    """
     with get_db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                CREATE TABLE IF NOT EXISTS numeros_sms (
-                    aid TEXT PRIMARY KEY,
-                    user_id TEXT,
-                    price DOUBLE PRECISION,
-                    cancelado BOOLEAN DEFAULT FALSE,
-                    data_criacao TIMESTAMP DEFAULT NOW()
-                )
-            """)
+                UPDATE usuarios
+                SET saldo = saldo - %s
+                WHERE id = %s AND saldo >= %s
+                RETURNING saldo
+            """, (valor, str(uid), valor))
+            result = cur.fetchone()
             conn.commit()
-criar_tabela_numeros_sms()
+            return bool(result)
 
 class TelegramLogHandler(logging.Handler):
     def emit(self, record):
@@ -81,7 +82,7 @@ PRAZO_SEGUNDOS   = PRAZO_MINUTOS * 60
 def carregar_usuario(uid):
     with get_db_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM usuarios WHERE id=%s", (str(uid),))
+            cur.execute("SELECT * FROM usuarios WHERE id=%s", (uid,))
             user = cur.fetchone()
             if not user:
                 return None
@@ -99,7 +100,7 @@ def salvar_usuario(user):
                 json.dumps(user['numeros']),
                 user.get('refer'),
                 json.dumps(user.get('indicados', [])),
-                str(user['id'])
+                user['id']
             ))
             conn.commit()
     try:
@@ -110,33 +111,25 @@ def salvar_usuario(user):
 def criar_usuario(uid, refer=None):
     with get_db_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT id FROM usuarios WHERE id=%s", (str(uid),))
+            cur.execute("SELECT id FROM usuarios WHERE id=%s", (uid,))
             if cur.fetchone():
                 return
             cur.execute("""
                 INSERT INTO usuarios (id, saldo, numeros, refer, indicados)
                 VALUES (%s, %s, %s, %s, %s)
-            """, (str(uid), 0.0, json.dumps([]), refer, json.dumps([])))
+            """, (uid, 0.0, json.dumps([]), refer, json.dumps([])))
             conn.commit()
             logger.info(f"Novo usuário criado: {uid}")
             # Indicação
             if refer and str(refer) != str(uid):
-                cur.execute("SELECT indicados FROM usuarios WHERE id=%s", (str(refer),))
+                cur.execute("SELECT indicados FROM usuarios WHERE id=%s", (refer,))
                 result = cur.fetchone()
                 if result:
                     indicados = json.loads(result['indicados'] or "[]")
                     if str(uid) not in indicados:
                         indicados.append(str(uid))
-                        cur.execute("UPDATE usuarios SET indicados=%s WHERE id=%s", (json.dumps(indicados), str(refer)))
+                        cur.execute("UPDATE usuarios SET indicados=%s WHERE id=%s", (json.dumps(indicados), refer))
                         conn.commit()
-
-def alterar_saldo(uid, novo):
-    user = carregar_usuario(uid)
-    if not user:
-        return
-    user['saldo'] = novo
-    salvar_usuario(user)
-    logger.info(f"Saldo de {uid} = R$ {novo:.2f}")
 
 def adicionar_numero(uid, aid):
     user = carregar_usuario(uid)
@@ -162,30 +155,6 @@ def exportar_backup_json():
                 json.dump(users, f, indent=2, ensure_ascii=False)
             with open("usuarios_backup.json", "rb") as bf:
                 backup_bot.send_document(BACKUP_CHAT_ID, bf)
-
-# === Proteção: REGISTRO de número e controle de saldo cancelado ===
-def registrar_numero_sms(aid, user_id, price):
-    with get_db_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO numeros_sms (aid, user_id, price, cancelado) VALUES (%s, %s, %s, FALSE) ON CONFLICT (aid) DO NOTHING",
-                (aid, str(user_id), price)
-            )
-            conn.commit()
-
-def marcar_cancelado_e_devolver(uid, aid):
-    with get_db_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT cancelado, price FROM numeros_sms WHERE aid=%s FOR UPDATE", (aid,))
-            row = cur.fetchone()
-            if not row or row['cancelado']:
-                return False  # Já cancelado, não devolve nada!
-            price = row['price']
-            cur.execute("UPDATE numeros_sms SET cancelado=TRUE WHERE aid=%s", (aid,))
-            cur.execute("UPDATE usuarios SET saldo=saldo+%s WHERE id=%s", (price, str(uid)))
-            conn.commit()
-    return True
-
 # ============ SMSBOWER ===============
 def solicitar_numero(servico, max_price=None):
     params = {
@@ -258,8 +227,9 @@ def spawn_sms_thread(aid):
                 continue
             if status == 'STATUS_CANCEL':
                 if not info['codes']:
-                    ok = marcar_cancelado_e_devolver(info['user_id'], aid)
-                    if ok:
+                    user = carregar_usuario(info['user_id'])
+                    if user:
+                        descontar_saldo_atomic(info['user_id'], -info['price'])
                         bot.send_message(
                             chat_id,
                             f"❌ Cancelado pelo provider. R${info['price']:.2f} devolvido."
@@ -517,10 +487,12 @@ def cb_comprar(c):
         'picpay':'ev',
         'outros':'ot'
     }
-    balance = carregar_usuario(user_id)['saldo']
     price, service = prices[key], names[key]
-    if balance < price:
+    
+    # DESCONTO DE SALDO ATÔMICO E SEGURO
+    if not descontar_saldo_atomic(user_id, price):
         return bot.answer_callback_query(c.id, '❌ Saldo insuficiente.', True)
+
     try:
         bot.edit_message_text(
             '⏳ Solicitando número...',
@@ -538,13 +510,12 @@ def cb_comprar(c):
         if resp.get('status') == 'success':
             break
     if resp.get('status') != 'success':
-        return bot.send_message(c.message.chat.id, '🚫 Sem números disponíveis.')
+        descontar_saldo_atomic(user_id, -price)  # reverte o desconto
+        return bot.send_message(c.message.chat.id, '🚫 Sem números disponíveis. Saldo não foi descontado.')
     aid   = resp['id']
     full  = resp['number']
     short = full[2:] if full.startswith('55') else full
     adicionar_numero(user_id, aid)
-    registrar_numero_sms(aid, user_id, price)
-    alterar_saldo(user_id, balance - price)
     kb_blocked = telebot.types.InlineKeyboardMarkup()
     kb_blocked.row(
         telebot.types.InlineKeyboardButton(
@@ -629,12 +600,13 @@ def cb_comprar(c):
         info = status_map.get(aid)
         if info and not info.get('codes') and not info.get('canceled_by_user'):
             cancelar_numero(aid)
-            ok = marcar_cancelado_e_devolver(info['user_id'], aid)
-            if ok:
-                try:
-                    bot.delete_message(info['chat_id'], info['message_id'])
-                except:
-                    pass
+            user = carregar_usuario(info['user_id'])
+            if user:
+                descontar_saldo_atomic(info['user_id'], -info['price'])
+            try:
+                bot.delete_message(info['chat_id'], info['message_id'])
+            except:
+                pass
     threading.Thread(target=countdown, daemon=True).start()
     threading.Thread(target=auto_cancel, daemon=True).start()
 
@@ -666,15 +638,14 @@ def cancelar_user(c):
         return bot.answer_callback_query(c.id, '❌ Já cancelado.', True)
     info['canceled_by_user'] = True
     cancelar_numero(aid)
-    ok = marcar_cancelado_e_devolver(info['user_id'], aid)
-    if ok:
-        try:
-            bot.delete_message(info['chat_id'], info['message_id'])
-        except:
-            pass
-        bot.answer_callback_query(c.id, '✅ Cancelado e saldo devolvido.', show_alert=True)
-    else:
-        bot.answer_callback_query(c.id, '❌ Já cancelado anteriormente.', show_alert=True)
+    user = carregar_usuario(info['user_id'])
+    if user:
+        descontar_saldo_atomic(info['user_id'], -info['price'])
+    try:
+        bot.delete_message(info['chat_id'], info['message_id'])
+    except:
+        pass
+    bot.answer_callback_query(c.id, '✅ Cancelado e saldo devolvido.', show_alert=True)
 
 # =============== FLASK APP ===============
 
@@ -712,7 +683,7 @@ def mp_webhook():
                             ref_user = carregar_usuario(refid)
                             if ref_user:
                                 bonus = round(amt * 0.10, 2)
-                                alterar_saldo(refid, ref_user['saldo'] + bonus)
+                                descontar_saldo_atomic(refid, -bonus)
                                 try:
                                     bot.send_message(
                                         int(refid),
@@ -721,12 +692,11 @@ def mp_webhook():
                                 except:
                                     pass
                                 ref_text = f"\nIndicado por: {refid}\nBônus enviado: R$ {bonus:.2f}"
-                        alterar_saldo(uid, current + amt)
+                        descontar_saldo_atomic(uid, -amt)
                         bot.send_message(
                             uid,
                             f"✅ Recarga de R$ {amt:.2f} confirmada! Seu novo saldo é R$ {current + amt:.2f}"
                         )
-                        # Notifica no bot admin de depósito
                         try:
                             admin_bot.send_message(
                                 ADMIN_CHAT_ID,

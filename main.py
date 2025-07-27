@@ -86,6 +86,7 @@ logger.addHandler(handler)
 data_lock        = threading.Lock()
 status_lock      = threading.Lock()
 status_map       = {}
+mensagens_codigo_sms = {}
 PENDING_RECHARGE = {}
 PRAZO_MINUTOS    = 23
 PRAZO_SEGUNDOS   = PRAZO_MINUTOS * 60
@@ -461,7 +462,6 @@ def cb_comprar(c):
         text, parse_mode='Markdown', reply_markup=kb_blocked
     )
     status_map[aid] = {
-mensagens_codigo_sms = {}
 
 def atualizar_mensagem_codigo(user_id, text, kb):
     try:

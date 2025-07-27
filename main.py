@@ -86,7 +86,6 @@ logger.addHandler(handler)
 data_lock        = threading.Lock()
 status_lock      = threading.Lock()
 status_map       = {}
-mensagens_codigo_sms = {}
 PENDING_RECHARGE = {}
 PRAZO_MINUTOS    = 23
 PRAZO_SEGUNDOS   = PRAZO_MINUTOS * 60
@@ -462,26 +461,6 @@ def cb_comprar(c):
         text, parse_mode='Markdown', reply_markup=kb_blocked
     )
     status_map[aid] = {
-
-def atualizar_mensagem_codigo(user_id, text, kb):
-    try:
-        if user_id in mensagens_codigo_sms:
-            bot.edit_message_text(
-                text,
-                chat_id=mensagens_codigo_sms[user_id]['chat_id'],
-                message_id=mensagens_codigo_sms[user_id]['message_id'],
-                parse_mode='Markdown',
-                reply_markup=kb
-            )
-        else:
-            msg = bot.send_message(user_id, text, parse_mode='Markdown', reply_markup=kb)
-            mensagens_codigo_sms[user_id] = {
-                'chat_id': msg.chat.id,
-                'message_id': msg.message_id
-            }
-    except Exception as e:
-        print("Erro ao atualizar mensagem:", e)
-
         'user_id':    user_id,
         'price':      price,
         'chat_id':    msg.chat.id,
@@ -528,7 +507,7 @@ def atualizar_mensagem_codigo(user_id, text, kb):
                         telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu')
                     )
                     try:
-                        atualizar_mensagem_codigo(info['user_id'], text, kb)
+                        bot.edit_message_text(text, info['chat_id'], info['message_id'], parse_mode='Markdown', reply_markup=kb)
                     except Exception: pass
                 time.sleep(5)
         threading.Thread(target=check_sms, daemon=True).start()
@@ -623,7 +602,7 @@ def retry_sms(c):
                         telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu')
                     )
                     try:
-                        atualizar_mensagem_codigo(info['user_id'], text, kb)
+                        bot.edit_message_text(text, info['chat_id'], info['message_id'], parse_mode='Markdown', reply_markup=kb)
                     except Exception: pass
                 time.sleep(5)
         threading.Thread(target=check_sms, daemon=True).start()

@@ -7,8 +7,10 @@ import requests
 import re
 import psycopg2
 import psycopg2.extras
+
 from datetime import datetime
-from flask import Flask, request
+from flask import Flask, request, render_template_string, redirect
+
 import telebot
 import mercadopago
 
@@ -26,48 +28,35 @@ BACKUP_CHAT_ID    = os.getenv("BACKUP_CHAT_ID") or '6829680279'
 ADMIN_BOT_TOKEN   = os.getenv("ADMIN_BOT_TOKEN") or '8011035929:AAHpztTqqAXaQ-2cQb23qklZIX4k0vVM2Uk'
 ADMIN_CHAT_ID     = os.getenv("ADMIN_CHAT_ID") or '6829680279'
 DATABASE_URL      = os.getenv("DATABASE_URL")
+ADMIN_PANEL_TOKEN = os.getenv("ADMIN_PANEL_TOKEN") or "painel2024"
 
 bot         = telebot.TeleBot(BOT_TOKEN, threaded=True)
 alert_bot   = telebot.TeleBot(ALERT_BOT_TOKEN)
 backup_bot  = telebot.TeleBot(BACKUP_BOT_TOKEN)
 admin_bot   = telebot.TeleBot(ADMIN_BOT_TOKEN)
 mp_client   = mercadopago.SDK(MP_ACCESS_TOKEN)
+
 app = Flask(__name__)
 
 def get_db_conn():
     return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
 
-def criar_tabelas():
+# === Proteção: criar tabela de controle dos cancelamentos ===
+def criar_tabela_numeros_sms():
     with get_db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-            CREATE TABLE IF NOT EXISTS usuarios (
-                id TEXT PRIMARY KEY,
-                saldo DOUBLE PRECISION,
-                numeros TEXT,
-                refer TEXT,
-                indicados TEXT
-            );
-            """)
-            cur.execute("""
-            CREATE TABLE IF NOT EXISTS numeros_sms (
-                aid TEXT PRIMARY KEY,
-                user_id TEXT,
-                price DOUBLE PRECISION,
-                cancelado BOOLEAN DEFAULT FALSE,
-                data_criacao TIMESTAMP DEFAULT NOW()
-            );
-            """)
-            cur.execute("""
-            CREATE TABLE IF NOT EXISTS pagamentos_processados (
-                pid TEXT PRIMARY KEY,
-                uid TEXT,
-                valor DOUBLE PRECISION,
-                data TIMESTAMP DEFAULT NOW()
-            );
+                CREATE TABLE IF NOT EXISTS numeros_sms (
+                    aid TEXT PRIMARY KEY,
+                    user_id TEXT,
+                    price DOUBLE PRECISION,
+                    cancelado BOOLEAN DEFAULT FALSE,
+                    sms_recebido BOOLEAN DEFAULT FALSE,
+                    data_criacao TIMESTAMP DEFAULT NOW()
+                )
             """)
             conn.commit()
-criar_tabelas()
+criar_tabela_numeros_sms()
 
 class TelegramLogHandler(logging.Handler):
     def emit(self, record):
@@ -90,6 +79,7 @@ PENDING_RECHARGE = {}
 PRAZO_MINUTOS    = 23
 PRAZO_SEGUNDOS   = PRAZO_MINUTOS * 60
 
+# BANCO DE USUÁRIOS
 def carregar_usuario(uid):
     with get_db_conn() as conn:
         with conn.cursor() as cur:
@@ -131,6 +121,7 @@ def criar_usuario(uid, refer=None):
             """, (str(uid), 0.0, json.dumps([]), refer, json.dumps([])))
             conn.commit()
             logger.info(f"Novo usuário criado: {uid}")
+            # Indicação
             if refer and str(refer) != str(uid):
                 cur.execute("SELECT indicados FROM usuarios WHERE id=%s", (str(refer),))
                 result = cur.fetchone()
@@ -140,6 +131,25 @@ def criar_usuario(uid, refer=None):
                         indicados.append(str(uid))
                         cur.execute("UPDATE usuarios SET indicados=%s WHERE id=%s", (json.dumps(indicados), str(refer)))
                         conn.commit()
+
+def alterar_saldo(uid, novo):
+    with get_db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE usuarios SET saldo=%s WHERE id=%s", (novo, str(uid)))
+            conn.commit()
+    logger.info(f"Saldo de {uid} = R$ {novo:.2f}")
+
+def adicionar_numero(uid, aid):
+    user = carregar_usuario(uid)
+    if not user:
+        return
+    if aid not in user['numeros']:
+        user['numeros'].append(aid)
+        salvar_usuario(user)
+        logger.info(f"Número {aid} adicionado a {uid}")
+
+def get_user_ref_link(uid):
+    return f"https://t.me/{bot.get_me().username}?start={uid}"
 
 def exportar_backup_json():
     with get_db_conn() as conn:
@@ -176,48 +186,11 @@ def marcar_cancelado_e_devolver(uid, aid):
             conn.commit()
     return True
 
-def desconto_saldo_atomic(uid, valor_descontar):
+def marcar_sms_recebido(aid):
     with get_db_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT saldo FROM usuarios WHERE id=%s FOR UPDATE", (str(uid),))
-            res = cur.fetchone()
-            if not res:
-                return False
-            saldo_atual = float(res['saldo'])
-            if saldo_atual < valor_descontar:
-                return False
-            saldo_novo = saldo_atual - valor_descontar
-            cur.execute("UPDATE usuarios SET saldo=%s WHERE id=%s", (saldo_novo, str(uid)))
+            cur.execute("UPDATE numeros_sms SET sms_recebido=TRUE WHERE aid=%s", (aid,))
             conn.commit()
-    logger.info(f"Saldo de {uid} = R$ {saldo_novo:.2f}")
-    return True
-
-def registrar_pagamento(pid, uid, valor):
-    with get_db_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-            INSERT INTO pagamentos_processados (pid, uid, valor) VALUES (%s, %s, %s)
-            ON CONFLICT DO NOTHING
-            """, (pid, str(uid), valor))
-            conn.commit()
-
-def ja_processou_pagamento(pid):
-    with get_db_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT 1 FROM pagamentos_processados WHERE pid=%s", (pid,))
-            return cur.fetchone() is not None
-
-def adicionar_numero(uid, aid):
-    user = carregar_usuario(uid)
-    if not user:
-        return
-    if aid not in user['numeros']:
-        user['numeros'].append(aid)
-        salvar_usuario(user)
-        logger.info(f"Número {aid} adicionado a {uid}")
-
-def get_user_ref_link(uid):
-    return f"https://t.me/{bot.get_me().username}?start={uid}"
 
 # ============ SMSBOWER ===============
 def solicitar_numero(servico, max_price=None):
@@ -266,8 +239,78 @@ def obter_status(aid):
         logger.error(f"Erro getStatus: {e}")
         return None
 
-# =========== MENUS ===========
+def spawn_sms_thread(aid):
+    with status_lock:
+        info = status_map.get(aid)
+    if not info:
+        return
 
+    service = info['service']
+    full    = info['full']
+    short   = info['short']
+    chat_id = info['chat_id']
+    info.setdefault('codes', [])
+    info['canceled_by_user'] = False
+
+    def check_sms():
+        start = time.time()
+        while time.time() - start < PRAZO_SEGUNDOS:
+            status = obter_status(aid)
+            if info['canceled_by_user']:
+                return
+            if not status or status.startswith('STATUS_WAIT'):
+                time.sleep(5)
+                continue
+            if status == 'STATUS_CANCEL':
+                if not info['codes']:
+                    ok = marcar_cancelado_e_devolver(info['user_id'], aid)
+                    if ok:
+                        bot.send_message(
+                            chat_id,
+                            f"❌ Cancelado pelo provider. R${info['price']:.2f} devolvido."
+                        )
+                return
+            code = status.split(':', 1)[1] if ':' in status else status
+            if code not in info['codes']:
+                info['codes'].append(code)
+                marcar_sms_recebido(aid)
+                rt = datetime.now().strftime('%d/%m/%Y %H:%M:%S')
+                text = (
+                    f"📦 {service}\n"
+                    f"☎️ Número: `{full}`\n"
+                    f"☎️ Sem DDI: `{short}`\n\n"
+                )
+                for idx, cd in enumerate(info['codes'], 1):
+                    text += f"📩 SMS{idx}: `{cd}`\n"
+                text += f"🕘 {rt}"
+                kb = telebot.types.InlineKeyboardMarkup()
+                kb.row(
+                    telebot.types.InlineKeyboardButton(
+                        '📲 Receber outro SMS',
+                        callback_data=f'retry_{aid}'
+                    )
+                )
+                kb.row(
+                    telebot.types.InlineKeyboardButton(
+                        '📲 Comprar serviços', callback_data='menu_comprar'
+                    ),
+                    telebot.types.InlineKeyboardButton(
+                        '📜 Menu', callback_data='menu'
+                    )
+                )
+                try:
+                    bot.send_message(
+                        chat_id,
+                        text,
+                        parse_mode='Markdown',
+                        reply_markup=kb
+                    )
+                except Exception:
+                    pass
+            time.sleep(5)
+    threading.Thread(target=check_sms, daemon=True).start()
+
+# ==== MENUS E FLUXO DO BOT ====
 def send_menu(chat_id):
     kb = telebot.types.InlineKeyboardMarkup(row_width=1)
     kb.add(
@@ -280,6 +323,22 @@ def send_menu(chat_id):
     )
     bot.send_message(chat_id, 'Escolha uma opção:', reply_markup=kb)
 
+@bot.callback_query_handler(lambda c: c.data == 'menu')
+def callback_menu(c):
+    try: bot.answer_callback_query(c.id)
+    except: pass
+    send_menu(c.message.chat.id)
+
+def show_comprar_menu(chat_id):
+    kb = telebot.types.InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        telebot.types.InlineKeyboardButton('📲 Mercado Pago SMS - R$0.75', callback_data='comprar_mercado'),
+        telebot.types.InlineKeyboardButton('🇨🇳 SMS para China   - R$0.60', callback_data='comprar_china'),
+        telebot.types.InlineKeyboardButton('💸 PicPay SMS       - R$0.65', callback_data='comprar_picpay'),
+        telebot.types.InlineKeyboardButton('📡 Outros SMS        - R$0.90', callback_data='comprar_outros')
+    )
+    bot.send_message(chat_id, 'Escolha serviço:', reply_markup=kb)
+
 @bot.message_handler(commands=['start'])
 def cmd_start(m):
     refer = None
@@ -288,29 +347,16 @@ def cmd_start(m):
     criar_usuario(m.from_user.id, refer=refer)
     send_menu(m.chat.id)
 
-@bot.callback_query_handler(lambda c: c.data == 'menu')
-def callback_menu(c):
-    try: bot.answer_callback_query(c.id)
-    except: pass
-    send_menu(c.message.chat.id)
-
 @bot.callback_query_handler(lambda c: c.data == 'menu_comprar')
 def callback_menu_comprar(c):
     try: bot.answer_callback_query(c.id)
     except: pass
-    kb = telebot.types.InlineKeyboardMarkup(row_width=1)
-    kb.add(
-        telebot.types.InlineKeyboardButton('📲 Mercado Pago SMS - R$0.75', callback_data='comprar_mercado'),
-        telebot.types.InlineKeyboardButton('🇨🇳 SMS para China   - R$0.60', callback_data='comprar_china'),
-        telebot.types.InlineKeyboardButton('💸 PicPay SMS       - R$0.65', callback_data='comprar_picpay'),
-        telebot.types.InlineKeyboardButton('📡 Outros SMS        - R$0.90', callback_data='comprar_outros')
-    )
-    bot.send_message(c.message.chat.id, 'Escolha serviço:', reply_markup=kb)
+    show_comprar_menu(c.message.chat.id)
 
 @bot.message_handler(commands=['comprar'])
 def cmd_comprar(m):
     criar_usuario(m.from_user.id)
-    callback_menu_comprar(type('obj', (object,), {'id': None, 'message': m})())
+    show_comprar_menu(m.chat.id)
 
 @bot.callback_query_handler(lambda c: c.data == 'menu_recarregar')
 def menu_recarregar(c):
@@ -376,7 +422,9 @@ def menu_numeros(c):
     else:
         txt = '📋 *Seus números:*'
         for aid in nums:
-            txt += f"\n*ID:* `{aid}`"
+            inf = status_map.get(aid)
+            if inf:
+                txt += f"\n*ID:* `{aid}` `{inf['full']}` / `{inf['short']}`"
         bot.send_message(
             c.message.chat.id,
             txt,
@@ -399,7 +447,8 @@ def menu_refer(c):
     if indicados:
         nomes = []
         for id_ in indicados:
-            nomes.append(f"- {id_}")
+            try: nomes.append(f"- {id_}")
+            except: nomes.append(f"- {id_}")
         text += "\n" + "\n".join(nomes)
     bot.send_message(c.message.chat.id, text, parse_mode='Markdown')
     send_menu(c.message.chat.id)
@@ -409,42 +458,63 @@ def cb_comprar(c):
     user_id, key = c.from_user.id, c.data.split('_')[1]
     criar_usuario(user_id)
     prices = {
-        'mercado':0.75, 'china':0.6, 'picpay':0.65, 'outros':0.90
+        'mercado':0.75,
+        'china':0.6,
+        'picpay':0.65,
+        'outros':0.90
     }
     names  = {
-        'mercado':'Mercado Pago SMS','china':'SMS para China',
-        'picpay':'PicPay SMS','outros':'Outros SMS'
+        'mercado':'Mercado Pago SMS',
+        'china':'SMS para China',
+        'picpay':'PicPay SMS',
+        'outros':'Outros SMS'
     }
     idsms  = {
-        'mercado':'cq','china':'ev','picpay':'ev','outros':'ot'
+        'mercado':'cq',
+        'china':'ev',
+        'picpay':'ev',
+        'outros':'ot'
     }
+    balance = carregar_usuario(user_id)['saldo']
     price, service = prices[key], names[key]
-    ok = desconto_saldo_atomic(user_id, price)
-    if not ok:
+    if balance < price:
         return bot.answer_callback_query(c.id, '❌ Saldo insuficiente.', True)
     try:
-        bot.edit_message_text('⏳ Solicitando número...', c.message.chat.id, c.message.message_id)
-    except Exception: pass
+        bot.edit_message_text(
+            '⏳ Solicitando número...',
+            c.message.chat.id,
+            c.message.message_id
+        )
+    except telebot.apihelper.ApiTelegramException as e:
+        if "message is not modified" not in str(e):
+            raise
+    except Exception:
+        pass
     resp = {}
     for attempt in range(1, 14):
         resp = solicitar_numero(idsms[key], max_price=attempt)
         if resp.get('status') == 'success':
             break
-    if not resp.get('status') == 'success':
+    if resp.get('status') != 'success':
         return bot.send_message(c.message.chat.id, '🚫 Sem números disponíveis.')
     aid   = resp['id']
     full  = resp['number']
     short = full[2:] if full.startswith('55') else full
     adicionar_numero(user_id, aid)
     registrar_numero_sms(aid, user_id, price)
+    alterar_saldo(user_id, balance - price)
     kb_blocked = telebot.types.InlineKeyboardMarkup()
-    kb_blocked.row(telebot.types.InlineKeyboardButton(f'❌ Cancelar (2m)', callback_data=f'cancel_blocked_{aid}'))
+    kb_blocked.row(
+        telebot.types.InlineKeyboardButton(f'❌ Cancelar (2m)', callback_data=f'cancel_blocked_{aid}')
+    )
     kb_blocked.row(
         telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
         telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu')
     )
     kb_unlocked = telebot.types.InlineKeyboardMarkup()
-    kb_unlocked.row(telebot.types.InlineKeyboardButton(f'❌ Cancelar', callback_data=f'cancel_{aid}'))
+    kb_unlocked.row(
+        telebot.types.InlineKeyboardButton(f'❌ Cancelar', callback_data=f'cancel_{aid}')
+    )
     kb_unlocked.row(
         telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
         telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu')
@@ -458,7 +528,9 @@ def cb_comprar(c):
     )
     msg = bot.send_message(
         c.message.chat.id,
-        text, parse_mode='Markdown', reply_markup=kb_blocked
+        text,
+        parse_mode='Markdown',
+        reply_markup=kb_blocked
     )
     status_map[aid] = {
         'user_id':    user_id,
@@ -469,48 +541,6 @@ def cb_comprar(c):
         'full':       full,
         'short':      short
     }
-    def spawn_sms_thread(aid):
-        info = status_map.get(aid)
-        if not info: return
-        def check_sms():
-            start = time.time()
-            while time.time() - start < PRAZO_SEGUNDOS:
-                status = obter_status(aid)
-                if info.get('canceled_by_user'):
-                    return
-                if not status or status.startswith('STATUS_WAIT'):
-                    time.sleep(5)
-                    continue
-                if status == 'STATUS_CANCEL':
-                    if not info.get('codes'):
-                        ok = marcar_cancelado_e_devolver(info['user_id'], aid)
-                        if ok:
-                            bot.send_message(info['chat_id'], f"❌ Cancelado pelo provider. R${info['price']:.2f} devolvido.")
-                    return
-                code = status.split(':', 1)[1] if ':' in status else status
-                info.setdefault('codes', [])
-                if code not in info['codes']:
-                    info['codes'].append(code)
-                    rt = datetime.now().strftime('%d/%m/%Y %H:%M:%S')
-                    text = (
-                        f"📦 {info['service']}\n"
-                        f"☎️ Número: `{info['full']}`\n"
-                        f"☎️ Sem DDI: `{info['short']}`\n\n"
-                    )
-                    for idx, cd in enumerate(info['codes'], 1):
-                        text += f"📩 SMS{idx}: `{cd}`\n"
-                    text += f"🕘 {rt}"
-                    kb = telebot.types.InlineKeyboardMarkup()
-                    kb.row(telebot.types.InlineKeyboardButton('📲 Receber outro SMS', callback_data=f'retry_{aid}'))
-                    kb.row(
-                        telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
-                        telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu')
-                    )
-                    try:
-                        bot.edit_message_text(text, info['chat_id'], info['message_id'], parse_mode='Markdown', reply_markup=kb)
-                    except Exception: pass
-                time.sleep(5)
-        threading.Thread(target=check_sms, daemon=True).start()
     spawn_sms_thread(aid)
     def countdown():
         for minute in range(PRAZO_MINUTOS):
@@ -535,6 +565,9 @@ def cb_comprar(c):
                     parse_mode='Markdown',
                     reply_markup=kb_sel
                 )
+            except telebot.apihelper.ApiTelegramException as e:
+                if "message is not modified" not in str(e):
+                    raise
             except Exception:
                 pass
     def auto_cancel():
@@ -563,49 +596,6 @@ def retry_sms(c):
     except:
         pass
     bot.answer_callback_query(c.id, '🔄 Novo SMS solicitado.', show_alert=True)
-    # Reinicia thread SMS!
-    def spawn_sms_thread(aid):
-        info = status_map.get(aid)
-        if not info: return
-        def check_sms():
-            start = time.time()
-            while time.time() - start < PRAZO_SEGUNDOS:
-                status = obter_status(aid)
-                if info.get('canceled_by_user'):
-                    return
-                if not status or status.startswith('STATUS_WAIT'):
-                    time.sleep(5)
-                    continue
-                if status == 'STATUS_CANCEL':
-                    if not info.get('codes'):
-                        ok = marcar_cancelado_e_devolver(info['user_id'], aid)
-                        if ok:
-                            bot.send_message(info['chat_id'], f"❌ Cancelado pelo provider. R${info['price']:.2f} devolvido.")
-                    return
-                code = status.split(':', 1)[1] if ':' in status else status
-                info.setdefault('codes', [])
-                if code not in info['codes']:
-                    info['codes'].append(code)
-                    rt = datetime.now().strftime('%d/%m/%Y %H:%M:%S')
-                    text = (
-                        f"📦 {info['service']}\n"
-                        f"☎️ Número: `{info['full']}`\n"
-                        f"☎️ Sem DDI: `{info['short']}`\n\n"
-                    )
-                    for idx, cd in enumerate(info['codes'], 1):
-                        text += f"📩 SMS{idx}: `{cd}`\n"
-                    text += f"🕘 {rt}"
-                    kb = telebot.types.InlineKeyboardMarkup()
-                    kb.row(telebot.types.InlineKeyboardButton('📲 Receber outro SMS', callback_data=f'retry_{aid}'))
-                    kb.row(
-                        telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
-                        telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu')
-                    )
-                    try:
-                        bot.edit_message_text(text, info['chat_id'], info['message_id'], parse_mode='Markdown', reply_markup=kb)
-                    except Exception: pass
-                time.sleep(5)
-        threading.Thread(target=check_sms, daemon=True).start()
     spawn_sms_thread(aid)
 
 @bot.callback_query_handler(lambda c: c.data.startswith('cancel_blocked_'))
@@ -624,14 +614,92 @@ def cancelar_user(c):
     cancelar_numero(aid)
     ok = marcar_cancelado_e_devolver(info['user_id'], aid)
     if ok:
-        try: bot.delete_message(info['chat_id'], info['message_id'])
-        except: pass
+        try:
+            bot.delete_message(info['chat_id'], info['message_id'])
+        except:
+            pass
         bot.answer_callback_query(c.id, '✅ Cancelado e saldo devolvido.', show_alert=True)
     else:
         bot.answer_callback_query(c.id, '❌ Já cancelado anteriormente.', show_alert=True)
 
-# === FLASK APP WEBHOOKS ===
+# =============== PAINEL ADMIN WEB ===============
+@app.route('/admin', methods=['GET', 'POST'])
+def painel_admin():
+    token = request.args.get('token')
+    if token != ADMIN_PANEL_TOKEN:
+        return "Acesso não autorizado", 401
 
+    msg = ''
+    total_usuarios = total_saldo = total_numeros = total_cancelados = total_sms = 0
+
+    with get_db_conn() as conn:
+        with conn.cursor() as cur:
+            # Usuários e saldo
+            cur.execute("SELECT count(*), sum(saldo) FROM usuarios")
+            total_usuarios, total_saldo = cur.fetchone().values()
+            # Números vendidos
+            cur.execute("SELECT count(*) FROM numeros_sms")
+            total_numeros = cur.fetchone()['count']
+            # Cancelados
+            cur.execute("SELECT count(*) FROM numeros_sms WHERE cancelado=TRUE")
+            total_cancelados = cur.fetchone()['count']
+            # SMS recebidos
+            cur.execute("SELECT count(*) FROM numeros_sms WHERE sms_recebido=TRUE")
+            total_sms = cur.fetchone()['count']
+
+    if request.method == 'POST':
+        if request.form.get('envia_mensagem'):
+            texto = request.form.get('mensagem')
+            with get_db_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT id FROM usuarios")
+                    for row in cur.fetchall():
+                        try:
+                            bot.send_message(int(row['id']), texto)
+                        except Exception:
+                            pass
+            msg = 'Mensagem enviada para todos!'
+        elif request.form.get('add_saldo'):
+            valor = float(request.form.get('valor'))
+            tipo = request.form.get('tipo')
+            usuario = request.form.get('usuario')
+            with get_db_conn() as conn:
+                with conn.cursor() as cur:
+                    if tipo == 'todos':
+                        cur.execute("UPDATE usuarios SET saldo=saldo+%s", (valor,))
+                    else:
+                        cur.execute("UPDATE usuarios SET saldo=saldo+%s WHERE id=%s", (valor, usuario))
+                    conn.commit()
+            msg = 'Saldo adicionado!'
+
+    return render_template_string("""
+    <h2>Painel Admin Bot SMS</h2>
+    <form method=post>
+      <b>Mensagem para todos:</b><br>
+      <textarea name=mensagem rows=2 cols=60></textarea><br>
+      <button name="envia_mensagem" type="submit">Enviar mensagem</button>
+    </form>
+    <br>
+    <form method=post>
+      <b>Adicionar saldo:</b>
+      <input name=valor type=number step=0.01 required>
+      <select name=tipo>
+        <option value="todos">Todos usuários</option>
+        <option value="um">Apenas para usuário:</option>
+      </select>
+      <input name=usuario placeholder="ID usuário (se for um só)">
+      <button name="add_saldo" type="submit">Adicionar saldo</button>
+    </form>
+    <hr>
+    <b>Total usuários:</b> {{total_usuarios}}<br>
+    <b>Saldo total (R$):</b> {{total_saldo or 0}}<br>
+    <b>Números vendidos:</b> {{total_numeros}}<br>
+    <b>Números cancelados:</b> {{total_cancelados}}<br>
+    <b>Números com SMS recebido:</b> {{total_sms}}<br>
+    <b>{{msg}}</b>
+    """, total_usuarios=total_usuarios, total_saldo=total_saldo, total_numeros=total_numeros, total_cancelados=total_cancelados, total_sms=total_sms, msg=msg)
+
+# =============== FLASK WEBHOOKS ===============
 @app.route('/', methods=['GET'])
 def health():
     return 'OK', 200
@@ -647,9 +715,7 @@ def telegram_webhook():
 def mp_webhook():
     data = request.get_json()
     if data.get('type') == 'payment':
-        pid = str(data['data']['id'])
-        if ja_processou_pagamento(pid):  # NÃO DUPLICAR saldo!
-            return '', 200
+        pid = data['data']['id']
         resp = mp_client.payment().get(pid)['response']
         if resp.get('status') == 'approved':
             ext = resp.get('external_reference', '')
@@ -668,7 +734,7 @@ def mp_webhook():
                             ref_user = carregar_usuario(refid)
                             if ref_user:
                                 bonus = round(amt * 0.10, 2)
-                                desconto_saldo_atomic(refid, -bonus) # adiciona bônus
+                                alterar_saldo(refid, ref_user['saldo'] + bonus)
                                 try:
                                     bot.send_message(
                                         int(refid),
@@ -677,8 +743,7 @@ def mp_webhook():
                                 except:
                                     pass
                                 ref_text = f"\nIndicado por: {refid}\nBônus enviado: R$ {bonus:.2f}"
-                        desconto_saldo_atomic(uid, -amt) # adiciona recarga
-                        registrar_pagamento(pid, uid, amt)
+                        alterar_saldo(uid, current + amt)
                         bot.send_message(
                             uid,
                             f"✅ Recarga de R$ {amt:.2f} confirmada! Seu novo saldo é R$ {current + amt:.2f}"

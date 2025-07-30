@@ -56,6 +56,26 @@ def criar_tabela_numeros_sms():
             conn.commit()
 criar_tabela_numeros_sms()
 
+# --------- Funções robustas para envio -----------
+def enviar_mensagem_bot(bot_instance, chat_id, texto, tentativas=3):
+    for _ in range(tentativas):
+        try:
+            bot_instance.send_message(chat_id, texto)
+            return True
+        except Exception:
+            time.sleep(1)
+    return False
+
+def enviar_documento_bot(bot_instance, chat_id, file_path, tentativas=3):
+    for _ in range(tentativas):
+        try:
+            with open(file_path, "rb") as bf:
+                bot_instance.send_document(chat_id, bf)
+            return True
+        except Exception:
+            time.sleep(1)
+    return False
+
 class TelegramLogHandler(logging.Handler):
     def emit(self, record):
         msg = self.format(record)
@@ -77,27 +97,7 @@ PENDING_RECHARGE = {}
 PRAZO_MINUTOS    = 23
 PRAZO_SEGUNDOS   = PRAZO_MINUTOS * 60
 
-# --------- Funções auxiliares para envio robusto ---------
-def enviar_mensagem_bot(bot_instance, chat_id, texto, tentativas=3):
-    for _ in range(tentativas):
-        try:
-            bot_instance.send_message(chat_id, texto)
-            return True
-        except Exception:
-            time.sleep(1)
-    return False
-
-def enviar_documento_bot(bot_instance, chat_id, file_path, tentativas=3):
-    for _ in range(tentativas):
-        try:
-            with open(file_path, "rb") as bf:
-                bot_instance.send_document(chat_id, bf)
-            return True
-        except Exception:
-            time.sleep(1)
-    return False
-
-# Usuário (CRUD)
+# ==================== USUÁRIO (CRUD) =====================
 def carregar_usuario(uid):
     with get_db_conn() as conn:
         with conn.cursor() as cur:
@@ -163,19 +163,9 @@ def exportar_backup_json():
                 u['indicados'] = json.loads(u.get('indicados', '[]'))
             with open("usuarios_backup.json", "w") as f:
                 json.dump(users, f, indent=2, ensure_ascii=False)
+            enviar_documento_bot(backup_bot, BACKUP_CHAT_ID, "usuarios_backup.json")
 
-    # ENVIA EM THREAD PARA NÃO TRAVAR
-    def send_backup():
-        for _ in range(3):  # tenta até 3x se falhar
-            try:
-                with open("usuarios_backup.json", "rb") as bf:
-                    backup_bot.send_document(BACKUP_CHAT_ID, bf)
-                break
-            except Exception as e:
-                time.sleep(2)
-    threading.Thread(target=send_backup, daemon=True).start()
-
-# Compra atômica (evita duplicidade)
+# ==================== OPERAÇÕES DE SALDO / NÚMEROS =====================
 def comprar_numero_atomico(uid, aid, price):
     with get_db_conn() as conn:
         with conn.cursor() as cur:
@@ -200,6 +190,7 @@ def comprar_numero_atomico(uid, aid, price):
                 ON CONFLICT (aid) DO NOTHING
             """, (aid, str(uid), price))
             conn.commit()
+    exportar_backup_json()
     logger.info(f"Saldo de {uid} = R$ {saldo:.2f}")
     logger.info(f"Número {aid} adicionado a {uid}")
     return True
@@ -215,6 +206,7 @@ def marcar_cancelado_e_devolver(uid, aid):
             cur.execute("UPDATE numeros_sms SET cancelado=TRUE WHERE aid=%s", (aid,))
             cur.execute("UPDATE usuarios SET saldo=saldo+%s WHERE id=%s", (price, str(uid)))
             conn.commit()
+    exportar_backup_json()
     return True
 
 def registrar_sms_recebido(aid):
@@ -223,7 +215,7 @@ def registrar_sms_recebido(aid):
             cur.execute("UPDATE numeros_sms SET sms_recebido=TRUE WHERE aid=%s", (aid,))
             conn.commit()
 
-# SMSBOWER
+# ==================== SMSBOWER =====================
 def solicitar_numero(servico, max_price=None):
     params = {
         'api_key': API_KEY_SMSBOWER,
@@ -352,7 +344,7 @@ def spawn_sms_thread(aid):
             time.sleep(5)
     threading.Thread(target=check_sms, daemon=True).start()
 
-# MENUS
+# ===================== MENUS E HANDLERS TELEGRAM =====================
 def send_menu(chat_id):
     kb = telebot.types.InlineKeyboardMarkup(row_width=1)
     kb.add(
@@ -700,6 +692,7 @@ def painel_admin():
                         cur.execute("UPDATE usuarios SET saldo=saldo+%s WHERE id=%s", (val, str(uid)))
                         conn.commit()
                         msg_feedback = f"Saldo de R$ {val:.2f} adicionado ao usuário {uid}."
+            exportar_backup_json()
 
     # Estatísticas
     with get_db_conn() as conn:
@@ -785,8 +778,8 @@ def mp_webhook():
                             with conn.cursor() as cur:
                                 cur.execute("UPDATE usuarios SET saldo=saldo+%s WHERE id=%s", (amt, str(uid)))
                                 conn.commit()
+                        exportar_backup_json()
                         bot.send_message(uid, f"✅ Recarga de R$ {amt:.2f} confirmada! Seu novo saldo é R$ {current + amt:.2f}")
-                        # Notifica admin_bot
                         enviar_mensagem_bot(
                             admin_bot,
                             ADMIN_CHAT_ID,

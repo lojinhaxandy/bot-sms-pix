@@ -7,14 +7,13 @@ import requests
 import re
 import psycopg2
 import psycopg2.extras
-
 from datetime import datetime
 from flask import Flask, request, render_template_string, redirect
 
 import telebot
 import mercadopago
 
-# === CONFIG ===
+# === CONFIGURAÇÃO VIA ENV ===
 BOT_TOKEN         = os.getenv("BOT_TOKEN")
 ALERT_BOT_TOKEN   = os.getenv("ALERT_BOT_TOKEN")
 ALERT_CHAT_ID     = os.getenv("ALERT_CHAT_ID")
@@ -28,7 +27,6 @@ BACKUP_CHAT_ID    = os.getenv("BACKUP_CHAT_ID") or '6829680279'
 ADMIN_BOT_TOKEN   = os.getenv("ADMIN_BOT_TOKEN") or '8011035929:AAHpztTqqAXaQ-2cQb23qklZIX4k0vVM2Uk'
 ADMIN_CHAT_ID     = os.getenv("ADMIN_CHAT_ID") or '6829680279'
 DATABASE_URL      = os.getenv("DATABASE_URL")
-ADMIN_PANEL_TOKEN = os.getenv("ADMIN_PANEL_TOKEN") or "painel2024"
 
 bot         = telebot.TeleBot(BOT_TOKEN, threaded=True)
 alert_bot   = telebot.TeleBot(ALERT_BOT_TOKEN)
@@ -41,7 +39,7 @@ app = Flask(__name__)
 def get_db_conn():
     return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
 
-# === Proteção: criar tabela de controle dos cancelamentos ===
+# === Proteção: criar tabela de controle dos cancelamentos e sms_recebido ===
 def criar_tabela_numeros_sms():
     with get_db_conn() as conn:
         with conn.cursor() as cur:
@@ -57,6 +55,106 @@ def criar_tabela_numeros_sms():
             """)
             conn.commit()
 criar_tabela_numeros_sms()
+
+# === PAINEL ADMIN WEB ===
+ADMIN_PANEL_TOKEN = "painel2024"
+admin_html = """
+<!DOCTYPE html>
+<html lang="pt-br"><head>
+<title>Painel Admin SMS Bot</title>
+<meta charset="utf-8">
+<style>
+body{background:#1e232b;color:#fff;font-family:sans-serif;margin:0;padding:0}
+.container{max-width:600px;margin:40px auto;background:#232939;padding:30px;border-radius:10px;box-shadow:0 0 15px #0007}
+h1{font-size:1.7em;margin-bottom:1em}
+input,textarea,button,select{padding:10px;margin:8px 0;width:100%;border-radius:7px;border:none;}
+label{font-weight:bold;}
+.stat-box{display:flex;justify-content:space-between;margin:12px 0;background:#272d38;padding:10px 14px;border-radius:8px}
+.btn{background:#2a97ff;color:#fff;cursor:pointer;font-weight:bold;}
+.btn:hover{background:#0a60c1;}
+hr{margin:25px 0;border:0;border-top:1px solid #222;}
+</style>
+</head><body>
+<div class="container">
+  <h1>Painel Admin - SMS Bot</h1>
+  <div class="stat-box"><span>Números vendidos:</span><b>{{ vendidos }}</b></div>
+  <div class="stat-box"><span>Números cancelados:</span><b>{{ cancelados }}</b></div>
+  <div class="stat-box"><span>Números que receberam SMS:</span><b>{{ recebidos }}</b></div>
+  <hr>
+  <form method="POST" action="/admin/send?token={{ token }}">
+    <label>Mensagem para TODOS os usuários:</label>
+    <textarea name="msg" required rows=3 placeholder="Digite sua mensagem..."></textarea>
+    <button class="btn" type="submit">Enviar Mensagem</button>
+  </form>
+  <hr>
+  <form method="POST" action="/admin/addsaldo?token={{ token }}">
+    <label>Adicionar saldo:</label>
+    <input name="valor" type="number" min="0.01" step="0.01" placeholder="Valor R$" required>
+    <input name="userid" placeholder="ID usuário (deixe vazio para todos)">
+    <button class="btn" type="submit">Adicionar Saldo</button>
+  </form>
+</div>
+</body></html>
+"""
+
+@app.route("/admin", methods=["GET"])
+def painel_admin():
+    token = request.args.get("token")
+    if token != ADMIN_PANEL_TOKEN:
+        return "Unauthorized", 401
+    with get_db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM numeros_sms")
+            vendidos = cur.fetchone()["count"]
+            cur.execute("SELECT count(*) FROM numeros_sms WHERE cancelado=TRUE")
+            cancelados = cur.fetchone()["count"]
+            try:
+                cur.execute("SELECT count(*) FROM numeros_sms WHERE sms_recebido=TRUE")
+                recebidos = cur.fetchone()["count"]
+            except Exception:
+                recebidos = 0
+    return render_template_string(admin_html,
+        vendidos=vendidos,
+        cancelados=cancelados,
+        recebidos=recebidos,
+        token=ADMIN_PANEL_TOKEN
+    )
+
+@app.route("/admin/send", methods=["POST"])
+def painel_enviar_msg():
+    token = request.args.get("token")
+    if token != ADMIN_PANEL_TOKEN: return "Unauthorized", 401
+    msg = request.form.get("msg")
+    if not msg: return redirect(f"/admin?token={token}")
+    with get_db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM usuarios")
+            ids = [r["id"] for r in cur.fetchall()]
+    for uid in ids:
+        try:
+            bot.send_message(uid, f"📢 [ADMIN]\n{msg}")
+            time.sleep(0.04)
+        except Exception:
+            pass
+    return redirect(f"/admin?token={token}")
+
+@app.route("/admin/addsaldo", methods=["POST"])
+def painel_addsaldo():
+    token = request.args.get("token")
+    if token != ADMIN_PANEL_TOKEN: return "Unauthorized", 401
+    valor = float(request.form.get("valor", 0))
+    userid = request.form.get("userid", "").strip()
+    if valor <= 0: return redirect(f"/admin?token={token}")
+    with get_db_conn() as conn:
+        with conn.cursor() as cur:
+            if userid:
+                cur.execute("UPDATE usuarios SET saldo=saldo+%s WHERE id=%s", (valor, str(userid)))
+            else:
+                cur.execute("UPDATE usuarios SET saldo=saldo+%s", (valor,))
+            conn.commit()
+    return redirect(f"/admin?token={token}")
+
+# ========== RESTANTE DO BOT ==========
 
 class TelegramLogHandler(logging.Handler):
     def emit(self, record):
@@ -79,7 +177,7 @@ PENDING_RECHARGE = {}
 PRAZO_MINUTOS    = 23
 PRAZO_SEGUNDOS   = PRAZO_MINUTOS * 60
 
-# BANCO DE USUÁRIOS
+# CRUD BANCO (usuários)
 def carregar_usuario(uid):
     with get_db_conn() as conn:
         with conn.cursor() as cur:
@@ -104,10 +202,6 @@ def salvar_usuario(user):
                 str(user['id'])
             ))
             conn.commit()
-    try:
-        exportar_backup_json()
-    except Exception as e:
-        logger.error(f"Erro ao enviar backup: {e}")
 
 def criar_usuario(uid, refer=None):
     with get_db_conn() as conn:
@@ -120,7 +214,6 @@ def criar_usuario(uid, refer=None):
                 VALUES (%s, %s, %s, %s, %s)
             """, (str(uid), 0.0, json.dumps([]), refer, json.dumps([])))
             conn.commit()
-            logger.info(f"Novo usuário criado: {uid}")
             # Indicação
             if refer and str(refer) != str(uid):
                 cur.execute("SELECT indicados FROM usuarios WHERE id=%s", (str(refer),))
@@ -133,10 +226,11 @@ def criar_usuario(uid, refer=None):
                         conn.commit()
 
 def alterar_saldo(uid, novo):
-    with get_db_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("UPDATE usuarios SET saldo=%s WHERE id=%s", (novo, str(uid)))
-            conn.commit()
+    user = carregar_usuario(uid)
+    if not user:
+        return
+    user['saldo'] = novo
+    salvar_usuario(user)
     logger.info(f"Saldo de {uid} = R$ {novo:.2f}")
 
 def adicionar_numero(uid, aid):
@@ -147,9 +241,6 @@ def adicionar_numero(uid, aid):
         user['numeros'].append(aid)
         salvar_usuario(user)
         logger.info(f"Número {aid} adicionado a {uid}")
-
-def get_user_ref_link(uid):
-    return f"https://t.me/{bot.get_me().username}?start={uid}"
 
 def exportar_backup_json():
     with get_db_conn() as conn:
@@ -164,6 +255,7 @@ def exportar_backup_json():
             with open("usuarios_backup.json", "rb") as bf:
                 backup_bot.send_document(BACKUP_CHAT_ID, bf)
 
+# === Proteção: REGISTRO de número e controle de saldo cancelado ===
 def registrar_numero_sms(aid, user_id, price):
     with get_db_conn() as conn:
         with conn.cursor() as cur:
@@ -186,7 +278,7 @@ def marcar_cancelado_e_devolver(uid, aid):
             conn.commit()
     return True
 
-def marcar_sms_recebido(aid):
+def registrar_sms_recebido(aid):
     with get_db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("UPDATE numeros_sms SET sms_recebido=TRUE WHERE aid=%s", (aid,))
@@ -249,6 +341,7 @@ def spawn_sms_thread(aid):
     full    = info['full']
     short   = info['short']
     chat_id = info['chat_id']
+    msg_id  = info.get('sms_message_id')
     info.setdefault('codes', [])
     info['canceled_by_user'] = False
 
@@ -273,7 +366,7 @@ def spawn_sms_thread(aid):
             code = status.split(':', 1)[1] if ':' in status else status
             if code not in info['codes']:
                 info['codes'].append(code)
-                marcar_sms_recebido(aid)
+                registrar_sms_recebido(aid)
                 rt = datetime.now().strftime('%d/%m/%Y %H:%M:%S')
                 text = (
                     f"📦 {service}\n"
@@ -299,43 +392,75 @@ def spawn_sms_thread(aid):
                     )
                 )
                 try:
-                    bot.send_message(
-                        chat_id,
-                        text,
-                        parse_mode='Markdown',
-                        reply_markup=kb
-                    )
+                    if msg_id:
+                        bot.edit_message_text(
+                            text, chat_id, msg_id,
+                            parse_mode='Markdown',
+                            reply_markup=kb
+                        )
+                    else:
+                        m = bot.send_message(
+                            chat_id, text,
+                            parse_mode='Markdown',
+                            reply_markup=kb
+                        )
+                        info['sms_message_id'] = m.message_id
+                except telebot.apihelper.ApiTelegramException as e:
+                    if "message is not modified" not in str(e):
+                        raise
                 except Exception:
                     pass
             time.sleep(5)
     threading.Thread(target=check_sms, daemon=True).start()
 
-# ==== MENUS E FLUXO DO BOT ====
+# =========== MENUS ===========
 def send_menu(chat_id):
     kb = telebot.types.InlineKeyboardMarkup(row_width=1)
     kb.add(
-        telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
-        telebot.types.InlineKeyboardButton('💰 Saldo', callback_data='menu_saldo'),
-        telebot.types.InlineKeyboardButton('🤑 Recarregar', callback_data='menu_recarregar'),
-        telebot.types.InlineKeyboardButton('👥 Referências', callback_data='menu_refer'),
-        telebot.types.InlineKeyboardButton('📜 Meus números', callback_data='menu_numeros'),
-        telebot.types.InlineKeyboardButton('🆘 Suporte', url='https://t.me/cpfbotttchina')
+        telebot.types.InlineKeyboardButton(
+            '📲 Comprar serviços', callback_data='menu_comprar'
+        ),
+        telebot.types.InlineKeyboardButton(
+            '💰 Saldo', callback_data='menu_saldo'
+        ),
+        telebot.types.InlineKeyboardButton(
+            '🤑 Recarregar', callback_data='menu_recarregar'
+        ),
+        telebot.types.InlineKeyboardButton(
+            '👥 Referências', callback_data='menu_refer'
+        ),
+        telebot.types.InlineKeyboardButton(
+            '📜 Meus números', callback_data='menu_numeros'
+        ),
+        telebot.types.InlineKeyboardButton(
+            '🆘 Suporte', url='https://t.me/cpfbotttchina'
+        )
     )
     bot.send_message(chat_id, 'Escolha uma opção:', reply_markup=kb)
 
 @bot.callback_query_handler(lambda c: c.data == 'menu')
 def callback_menu(c):
-    try: bot.answer_callback_query(c.id)
-    except: pass
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
     send_menu(c.message.chat.id)
 
 def show_comprar_menu(chat_id):
     kb = telebot.types.InlineKeyboardMarkup(row_width=1)
     kb.add(
-        telebot.types.InlineKeyboardButton('📲 Mercado Pago SMS - R$0.75', callback_data='comprar_mercado'),
-        telebot.types.InlineKeyboardButton('🇨🇳 SMS para China   - R$0.60', callback_data='comprar_china'),
-        telebot.types.InlineKeyboardButton('💸 PicPay SMS       - R$0.65', callback_data='comprar_picpay'),
-        telebot.types.InlineKeyboardButton('📡 Outros SMS        - R$0.90', callback_data='comprar_outros')
+        telebot.types.InlineKeyboardButton(
+            '📲 Mercado Pago SMS - R$0.75', callback_data='comprar_mercado'
+        ),
+        telebot.types.InlineKeyboardButton(
+            '🇨🇳 SMS para China   - R$0.60', callback_data='comprar_china'
+        ),
+        telebot.types.InlineKeyboardButton(
+            '💸 PicPay SMS       - R$0.65', callback_data='comprar_picpay'
+        ),
+        telebot.types.InlineKeyboardButton(
+            '📡 Outros SMS        - R$0.90', callback_data='comprar_outros'
+        )
     )
     bot.send_message(chat_id, 'Escolha serviço:', reply_markup=kb)
 
@@ -349,8 +474,10 @@ def cmd_start(m):
 
 @bot.callback_query_handler(lambda c: c.data == 'menu_comprar')
 def callback_menu_comprar(c):
-    try: bot.answer_callback_query(c.id)
-    except: pass
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
     show_comprar_menu(c.message.chat.id)
 
 @bot.message_handler(commands=['comprar'])
@@ -360,8 +487,10 @@ def cmd_comprar(m):
 
 @bot.callback_query_handler(lambda c: c.data == 'menu_recarregar')
 def menu_recarregar(c):
-    try: bot.answer_callback_query(c.id)
-    except: pass
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
     criar_usuario(c.from_user.id)
     PENDING_RECHARGE[c.from_user.id] = True
     bot.send_message(
@@ -392,8 +521,12 @@ def handle_recharge_amount(m):
         )
     )
     kb.row(
-        telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
-        telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu')
+        telebot.types.InlineKeyboardButton(
+            '📲 Comprar serviços', callback_data='menu_comprar'
+        ),
+        telebot.types.InlineKeyboardButton(
+            '📜 Menu', callback_data='menu'
+        )
     )
     bot.send_message(
         m.chat.id,
@@ -404,8 +537,10 @@ def handle_recharge_amount(m):
 
 @bot.callback_query_handler(lambda c: c.data == 'menu_saldo')
 def menu_saldo(c):
-    try: bot.answer_callback_query(c.id)
-    except: pass
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
     criar_usuario(c.from_user.id)
     s = carregar_usuario(c.from_user.id)['saldo']
     bot.send_message(c.message.chat.id, f"💰 Saldo: R$ {s:.2f}")
@@ -413,8 +548,10 @@ def menu_saldo(c):
 
 @bot.callback_query_handler(lambda c: c.data == 'menu_numeros')
 def menu_numeros(c):
-    try: bot.answer_callback_query(c.id)
-    except: pass
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
     criar_usuario(c.from_user.id)
     nums = carregar_usuario(c.from_user.id)['numeros']
     if not nums:
@@ -434,10 +571,12 @@ def menu_numeros(c):
 
 @bot.callback_query_handler(lambda c: c.data == 'menu_refer')
 def menu_refer(c):
-    try: bot.answer_callback_query(c.id)
-    except: pass
+    try:
+        bot.answer_callback_query(c.id)
+    except Exception:
+        pass
     u = carregar_usuario(c.from_user.id)
-    link = get_user_ref_link(c.from_user.id)
+    link = f"https://t.me/{bot.get_me().username}?start={c.from_user.id}"
     indicados = u.get("indicados", [])
     text = (
         f"📢 *Indique amigos e ganhe 10% de todas as recargas deles!*\n\n"
@@ -447,8 +586,10 @@ def menu_refer(c):
     if indicados:
         nomes = []
         for id_ in indicados:
-            try: nomes.append(f"- {id_}")
-            except: nomes.append(f"- {id_}")
+            try:
+                nomes.append(f"- {id_}")
+            except:
+                nomes.append(f"- {id_}")
         text += "\n" + "\n".join(nomes)
     bot.send_message(c.message.chat.id, text, parse_mode='Markdown')
     send_menu(c.message.chat.id)
@@ -505,19 +646,31 @@ def cb_comprar(c):
     alterar_saldo(user_id, balance - price)
     kb_blocked = telebot.types.InlineKeyboardMarkup()
     kb_blocked.row(
-        telebot.types.InlineKeyboardButton(f'❌ Cancelar (2m)', callback_data=f'cancel_blocked_{aid}')
+        telebot.types.InlineKeyboardButton(
+            f'❌ Cancelar (2m)', callback_data=f'cancel_blocked_{aid}'
+        )
     )
     kb_blocked.row(
-        telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
-        telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu')
+        telebot.types.InlineKeyboardButton(
+            '📲 Comprar serviços', callback_data='menu_comprar'
+        ),
+        telebot.types.InlineKeyboardButton(
+            '📜 Menu', callback_data='menu'
+        )
     )
     kb_unlocked = telebot.types.InlineKeyboardMarkup()
     kb_unlocked.row(
-        telebot.types.InlineKeyboardButton(f'❌ Cancelar', callback_data=f'cancel_{aid}')
+        telebot.types.InlineKeyboardButton(
+            f'❌ Cancelar', callback_data=f'cancel_{aid}'
+        )
     )
     kb_unlocked.row(
-        telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
-        telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu')
+        telebot.types.InlineKeyboardButton(
+            '📲 Comprar serviços', callback_data='menu_comprar'
+        ),
+        telebot.types.InlineKeyboardButton(
+            '📜 Menu', callback_data='menu'
+        )
     )
     text = (
         f"📦 {service}\n"
@@ -622,84 +775,8 @@ def cancelar_user(c):
     else:
         bot.answer_callback_query(c.id, '❌ Já cancelado anteriormente.', show_alert=True)
 
-# =============== PAINEL ADMIN WEB ===============
-@app.route('/admin', methods=['GET', 'POST'])
-def painel_admin():
-    token = request.args.get('token')
-    if token != ADMIN_PANEL_TOKEN:
-        return "Acesso não autorizado", 401
+# =============== FLASK APP ===============
 
-    msg = ''
-    total_usuarios = total_saldo = total_numeros = total_cancelados = total_sms = 0
-
-    with get_db_conn() as conn:
-        with conn.cursor() as cur:
-            # Usuários e saldo
-            cur.execute("SELECT count(*), sum(saldo) FROM usuarios")
-            total_usuarios, total_saldo = cur.fetchone().values()
-            # Números vendidos
-            cur.execute("SELECT count(*) FROM numeros_sms")
-            total_numeros = cur.fetchone()['count']
-            # Cancelados
-            cur.execute("SELECT count(*) FROM numeros_sms WHERE cancelado=TRUE")
-            total_cancelados = cur.fetchone()['count']
-            # SMS recebidos
-            cur.execute("SELECT count(*) FROM numeros_sms WHERE sms_recebido=TRUE")
-            total_sms = cur.fetchone()['count']
-
-    if request.method == 'POST':
-        if request.form.get('envia_mensagem'):
-            texto = request.form.get('mensagem')
-            with get_db_conn() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT id FROM usuarios")
-                    for row in cur.fetchall():
-                        try:
-                            bot.send_message(int(row['id']), texto)
-                        except Exception:
-                            pass
-            msg = 'Mensagem enviada para todos!'
-        elif request.form.get('add_saldo'):
-            valor = float(request.form.get('valor'))
-            tipo = request.form.get('tipo')
-            usuario = request.form.get('usuario')
-            with get_db_conn() as conn:
-                with conn.cursor() as cur:
-                    if tipo == 'todos':
-                        cur.execute("UPDATE usuarios SET saldo=saldo+%s", (valor,))
-                    else:
-                        cur.execute("UPDATE usuarios SET saldo=saldo+%s WHERE id=%s", (valor, usuario))
-                    conn.commit()
-            msg = 'Saldo adicionado!'
-
-    return render_template_string("""
-    <h2>Painel Admin Bot SMS</h2>
-    <form method=post>
-      <b>Mensagem para todos:</b><br>
-      <textarea name=mensagem rows=2 cols=60></textarea><br>
-      <button name="envia_mensagem" type="submit">Enviar mensagem</button>
-    </form>
-    <br>
-    <form method=post>
-      <b>Adicionar saldo:</b>
-      <input name=valor type=number step=0.01 required>
-      <select name=tipo>
-        <option value="todos">Todos usuários</option>
-        <option value="um">Apenas para usuário:</option>
-      </select>
-      <input name=usuario placeholder="ID usuário (se for um só)">
-      <button name="add_saldo" type="submit">Adicionar saldo</button>
-    </form>
-    <hr>
-    <b>Total usuários:</b> {{total_usuarios}}<br>
-    <b>Saldo total (R$):</b> {{total_saldo or 0}}<br>
-    <b>Números vendidos:</b> {{total_numeros}}<br>
-    <b>Números cancelados:</b> {{total_cancelados}}<br>
-    <b>Números com SMS recebido:</b> {{total_sms}}<br>
-    <b>{{msg}}</b>
-    """, total_usuarios=total_usuarios, total_saldo=total_saldo, total_numeros=total_numeros, total_cancelados=total_cancelados, total_sms=total_sms, msg=msg)
-
-# =============== FLASK WEBHOOKS ===============
 @app.route('/', methods=['GET'])
 def health():
     return 'OK', 200
@@ -748,6 +825,7 @@ def mp_webhook():
                             uid,
                             f"✅ Recarga de R$ {amt:.2f} confirmada! Seu novo saldo é R$ {current + amt:.2f}"
                         )
+                        # Notifica no bot admin de depósito
                         try:
                             admin_bot.send_message(
                                 ADMIN_CHAT_ID,

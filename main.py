@@ -8,7 +8,7 @@ import re
 import psycopg2
 import psycopg2.extras
 from datetime import datetime
-from flask import Flask, request, render_template_string, redirect
+from flask import Flask, request, render_template_string
 
 import telebot
 import mercadopago
@@ -77,6 +77,26 @@ PENDING_RECHARGE = {}
 PRAZO_MINUTOS    = 23
 PRAZO_SEGUNDOS   = PRAZO_MINUTOS * 60
 
+# --------- Funções auxiliares para envio robusto ---------
+def enviar_mensagem_bot(bot_instance, chat_id, texto, tentativas=3):
+    for _ in range(tentativas):
+        try:
+            bot_instance.send_message(chat_id, texto)
+            return True
+        except Exception:
+            time.sleep(1)
+    return False
+
+def enviar_documento_bot(bot_instance, chat_id, file_path, tentativas=3):
+    for _ in range(tentativas):
+        try:
+            with open(file_path, "rb") as bf:
+                bot_instance.send_document(chat_id, bf)
+            return True
+        except Exception:
+            time.sleep(1)
+    return False
+
 # Usuário (CRUD)
 def carregar_usuario(uid):
     with get_db_conn() as conn:
@@ -143,8 +163,7 @@ def exportar_backup_json():
                 u['indicados'] = json.loads(u.get('indicados', '[]'))
             with open("usuarios_backup.json", "w") as f:
                 json.dump(users, f, indent=2, ensure_ascii=False)
-            with open("usuarios_backup.json", "rb") as bf:
-                backup_bot.send_document(BACKUP_CHAT_ID, bf)
+            enviar_documento_bot(backup_bot, BACKUP_CHAT_ID, "usuarios_backup.json")
 
 # Compra atômica (evita duplicidade)
 def comprar_numero_atomico(uid, aid, price):
@@ -757,12 +776,12 @@ def mp_webhook():
                                 cur.execute("UPDATE usuarios SET saldo=saldo+%s WHERE id=%s", (amt, str(uid)))
                                 conn.commit()
                         bot.send_message(uid, f"✅ Recarga de R$ {amt:.2f} confirmada! Seu novo saldo é R$ {current + amt:.2f}")
-                        try:
-                            admin_bot.send_message(ADMIN_CHAT_ID,
-                                f"💰 Novo DEPÓSITO\nUser: {uid}\nValor: R$ {amt:.2f}\nData: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}{ref_text}"
-                            )
-                        except Exception as e:
-                            logger.error(f"Erro envio admin recarga: {e}")
+                        # Notifica admin_bot
+                        enviar_mensagem_bot(
+                            admin_bot,
+                            ADMIN_CHAT_ID,
+                            f"💰 Novo DEPÓSITO\nUser: {uid}\nValor: R$ {amt:.2f}\nData: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}{ref_text}"
+                        )
                 except Exception as e:
                     logger.error(f"Erro external_reference: {e}")
     return '', 200

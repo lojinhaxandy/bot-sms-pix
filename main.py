@@ -13,7 +13,7 @@ from flask import Flask, request, render_template_string, redirect
 import telebot
 import mercadopago
 
-# === CONFIGURAÇÃO VIA ENV ===
+# === CONFIG ===
 BOT_TOKEN         = os.getenv("BOT_TOKEN")
 ALERT_BOT_TOKEN   = os.getenv("ALERT_BOT_TOKEN")
 ALERT_CHAT_ID     = os.getenv("ALERT_CHAT_ID")
@@ -27,19 +27,19 @@ BACKUP_CHAT_ID    = os.getenv("BACKUP_CHAT_ID") or '6829680279'
 ADMIN_BOT_TOKEN   = os.getenv("ADMIN_BOT_TOKEN") or '8011035929:AAHpztTqqAXaQ-2cQb23qklZIX4k0vVM2Uk'
 ADMIN_CHAT_ID     = os.getenv("ADMIN_CHAT_ID") or '6829680279'
 DATABASE_URL      = os.getenv("DATABASE_URL")
+PAINEL_TOKEN      = os.getenv("PAINEL_TOKEN") or "painel2024"
 
 bot         = telebot.TeleBot(BOT_TOKEN, threaded=True)
 alert_bot   = telebot.TeleBot(ALERT_BOT_TOKEN)
 backup_bot  = telebot.TeleBot(BACKUP_BOT_TOKEN)
 admin_bot   = telebot.TeleBot(ADMIN_BOT_TOKEN)
 mp_client   = mercadopago.SDK(MP_ACCESS_TOKEN)
-
 app = Flask(__name__)
 
 def get_db_conn():
     return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
 
-# === Proteção: criar tabela de controle dos cancelamentos e sms_recebido ===
+# Cria tabela de números_sms se não existir
 def criar_tabela_numeros_sms():
     with get_db_conn() as conn:
         with conn.cursor() as cur:
@@ -55,106 +55,6 @@ def criar_tabela_numeros_sms():
             """)
             conn.commit()
 criar_tabela_numeros_sms()
-
-# === PAINEL ADMIN WEB ===
-ADMIN_PANEL_TOKEN = "painel2024"
-admin_html = """
-<!DOCTYPE html>
-<html lang="pt-br"><head>
-<title>Painel Admin SMS Bot</title>
-<meta charset="utf-8">
-<style>
-body{background:#1e232b;color:#fff;font-family:sans-serif;margin:0;padding:0}
-.container{max-width:600px;margin:40px auto;background:#232939;padding:30px;border-radius:10px;box-shadow:0 0 15px #0007}
-h1{font-size:1.7em;margin-bottom:1em}
-input,textarea,button,select{padding:10px;margin:8px 0;width:100%;border-radius:7px;border:none;}
-label{font-weight:bold;}
-.stat-box{display:flex;justify-content:space-between;margin:12px 0;background:#272d38;padding:10px 14px;border-radius:8px}
-.btn{background:#2a97ff;color:#fff;cursor:pointer;font-weight:bold;}
-.btn:hover{background:#0a60c1;}
-hr{margin:25px 0;border:0;border-top:1px solid #222;}
-</style>
-</head><body>
-<div class="container">
-  <h1>Painel Admin - SMS Bot</h1>
-  <div class="stat-box"><span>Números vendidos:</span><b>{{ vendidos }}</b></div>
-  <div class="stat-box"><span>Números cancelados:</span><b>{{ cancelados }}</b></div>
-  <div class="stat-box"><span>Números que receberam SMS:</span><b>{{ recebidos }}</b></div>
-  <hr>
-  <form method="POST" action="/admin/send?token={{ token }}">
-    <label>Mensagem para TODOS os usuários:</label>
-    <textarea name="msg" required rows=3 placeholder="Digite sua mensagem..."></textarea>
-    <button class="btn" type="submit">Enviar Mensagem</button>
-  </form>
-  <hr>
-  <form method="POST" action="/admin/addsaldo?token={{ token }}">
-    <label>Adicionar saldo:</label>
-    <input name="valor" type="number" min="0.01" step="0.01" placeholder="Valor R$" required>
-    <input name="userid" placeholder="ID usuário (deixe vazio para todos)">
-    <button class="btn" type="submit">Adicionar Saldo</button>
-  </form>
-</div>
-</body></html>
-"""
-
-@app.route("/admin", methods=["GET"])
-def painel_admin():
-    token = request.args.get("token")
-    if token != ADMIN_PANEL_TOKEN:
-        return "Unauthorized", 401
-    with get_db_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT count(*) FROM numeros_sms")
-            vendidos = cur.fetchone()["count"]
-            cur.execute("SELECT count(*) FROM numeros_sms WHERE cancelado=TRUE")
-            cancelados = cur.fetchone()["count"]
-            try:
-                cur.execute("SELECT count(*) FROM numeros_sms WHERE sms_recebido=TRUE")
-                recebidos = cur.fetchone()["count"]
-            except Exception:
-                recebidos = 0
-    return render_template_string(admin_html,
-        vendidos=vendidos,
-        cancelados=cancelados,
-        recebidos=recebidos,
-        token=ADMIN_PANEL_TOKEN
-    )
-
-@app.route("/admin/send", methods=["POST"])
-def painel_enviar_msg():
-    token = request.args.get("token")
-    if token != ADMIN_PANEL_TOKEN: return "Unauthorized", 401
-    msg = request.form.get("msg")
-    if not msg: return redirect(f"/admin?token={token}")
-    with get_db_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id FROM usuarios")
-            ids = [r["id"] for r in cur.fetchall()]
-    for uid in ids:
-        try:
-            bot.send_message(uid, f"📢 [ADMIN]\n{msg}")
-            time.sleep(0.04)
-        except Exception:
-            pass
-    return redirect(f"/admin?token={token}")
-
-@app.route("/admin/addsaldo", methods=["POST"])
-def painel_addsaldo():
-    token = request.args.get("token")
-    if token != ADMIN_PANEL_TOKEN: return "Unauthorized", 401
-    valor = float(request.form.get("valor", 0))
-    userid = request.form.get("userid", "").strip()
-    if valor <= 0: return redirect(f"/admin?token={token}")
-    with get_db_conn() as conn:
-        with conn.cursor() as cur:
-            if userid:
-                cur.execute("UPDATE usuarios SET saldo=saldo+%s WHERE id=%s", (valor, str(userid)))
-            else:
-                cur.execute("UPDATE usuarios SET saldo=saldo+%s", (valor,))
-            conn.commit()
-    return redirect(f"/admin?token={token}")
-
-# ========== RESTANTE DO BOT ==========
 
 class TelegramLogHandler(logging.Handler):
     def emit(self, record):
@@ -177,7 +77,7 @@ PENDING_RECHARGE = {}
 PRAZO_MINUTOS    = 23
 PRAZO_SEGUNDOS   = PRAZO_MINUTOS * 60
 
-# CRUD BANCO (usuários)
+# Usuário (CRUD)
 def carregar_usuario(uid):
     with get_db_conn() as conn:
         with conn.cursor() as cur:
@@ -202,6 +102,10 @@ def salvar_usuario(user):
                 str(user['id'])
             ))
             conn.commit()
+    try:
+        exportar_backup_json()
+    except Exception as e:
+        logger.error(f"Erro ao enviar backup: {e}")
 
 def criar_usuario(uid, refer=None):
     with get_db_conn() as conn:
@@ -214,6 +118,7 @@ def criar_usuario(uid, refer=None):
                 VALUES (%s, %s, %s, %s, %s)
             """, (str(uid), 0.0, json.dumps([]), refer, json.dumps([])))
             conn.commit()
+            logger.info(f"Novo usuário criado: {uid}")
             # Indicação
             if refer and str(refer) != str(uid):
                 cur.execute("SELECT indicados FROM usuarios WHERE id=%s", (str(refer),))
@@ -225,22 +130,8 @@ def criar_usuario(uid, refer=None):
                         cur.execute("UPDATE usuarios SET indicados=%s WHERE id=%s", (json.dumps(indicados), str(refer)))
                         conn.commit()
 
-def alterar_saldo(uid, novo):
-    user = carregar_usuario(uid)
-    if not user:
-        return
-    user['saldo'] = novo
-    salvar_usuario(user)
-    logger.info(f"Saldo de {uid} = R$ {novo:.2f}")
-
-def adicionar_numero(uid, aid):
-    user = carregar_usuario(uid)
-    if not user:
-        return
-    if aid not in user['numeros']:
-        user['numeros'].append(aid)
-        salvar_usuario(user)
-        logger.info(f"Número {aid} adicionado a {uid}")
+def get_user_ref_link(uid):
+    return f"https://t.me/{bot.get_me().username}?start={uid}"
 
 def exportar_backup_json():
     with get_db_conn() as conn:
@@ -255,15 +146,34 @@ def exportar_backup_json():
             with open("usuarios_backup.json", "rb") as bf:
                 backup_bot.send_document(BACKUP_CHAT_ID, bf)
 
-# === Proteção: REGISTRO de número e controle de saldo cancelado ===
-def registrar_numero_sms(aid, user_id, price):
+# Compra atômica (evita duplicidade)
+def comprar_numero_atomico(uid, aid, price):
     with get_db_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO numeros_sms (aid, user_id, price, cancelado) VALUES (%s, %s, %s, FALSE) ON CONFLICT (aid) DO NOTHING",
-                (aid, str(user_id), price)
-            )
+            cur.execute("SELECT saldo, numeros FROM usuarios WHERE id=%s FOR UPDATE", (str(uid),))
+            user = cur.fetchone()
+            if not user:
+                return False
+            saldo = user['saldo']
+            numeros = json.loads(user['numeros'])
+            if saldo < price:
+                return False
+            if aid in numeros:
+                return False
+            saldo -= price
+            numeros.append(aid)
+            cur.execute("""
+                UPDATE usuarios SET saldo=%s, numeros=%s WHERE id=%s
+            """, (saldo, json.dumps(numeros), str(uid)))
+            cur.execute("""
+                INSERT INTO numeros_sms (aid, user_id, price, cancelado, sms_recebido)
+                VALUES (%s, %s, %s, FALSE, FALSE)
+                ON CONFLICT (aid) DO NOTHING
+            """, (aid, str(uid), price))
             conn.commit()
+    logger.info(f"Saldo de {uid} = R$ {saldo:.2f}")
+    logger.info(f"Número {aid} adicionado a {uid}")
+    return True
 
 def marcar_cancelado_e_devolver(uid, aid):
     with get_db_conn() as conn:
@@ -284,7 +194,7 @@ def registrar_sms_recebido(aid):
             cur.execute("UPDATE numeros_sms SET sms_recebido=TRUE WHERE aid=%s", (aid,))
             conn.commit()
 
-# ============ SMSBOWER ===============
+# SMSBOWER
 def solicitar_numero(servico, max_price=None):
     params = {
         'api_key': API_KEY_SMSBOWER,
@@ -413,7 +323,7 @@ def spawn_sms_thread(aid):
             time.sleep(5)
     threading.Thread(target=check_sms, daemon=True).start()
 
-# =========== MENUS ===========
+# MENUS
 def send_menu(chat_id):
     kb = telebot.types.InlineKeyboardMarkup(row_width=1)
     kb.add(
@@ -440,27 +350,17 @@ def send_menu(chat_id):
 
 @bot.callback_query_handler(lambda c: c.data == 'menu')
 def callback_menu(c):
-    try:
-        bot.answer_callback_query(c.id)
-    except Exception:
-        pass
+    try: bot.answer_callback_query(c.id)
+    except: pass
     send_menu(c.message.chat.id)
 
 def show_comprar_menu(chat_id):
     kb = telebot.types.InlineKeyboardMarkup(row_width=1)
     kb.add(
-        telebot.types.InlineKeyboardButton(
-            '📲 Mercado Pago SMS - R$0.75', callback_data='comprar_mercado'
-        ),
-        telebot.types.InlineKeyboardButton(
-            '🇨🇳 SMS para China   - R$0.60', callback_data='comprar_china'
-        ),
-        telebot.types.InlineKeyboardButton(
-            '💸 PicPay SMS       - R$0.65', callback_data='comprar_picpay'
-        ),
-        telebot.types.InlineKeyboardButton(
-            '📡 Outros SMS        - R$0.90', callback_data='comprar_outros'
-        )
+        telebot.types.InlineKeyboardButton('📲 Mercado Pago SMS - R$0.75', callback_data='comprar_mercado'),
+        telebot.types.InlineKeyboardButton('🇨🇳 SMS para China   - R$0.60', callback_data='comprar_china'),
+        telebot.types.InlineKeyboardButton('💸 PicPay SMS       - R$0.65', callback_data='comprar_picpay'),
+        telebot.types.InlineKeyboardButton('📡 Outros SMS        - R$0.90', callback_data='comprar_outros')
     )
     bot.send_message(chat_id, 'Escolha serviço:', reply_markup=kb)
 
@@ -474,10 +374,8 @@ def cmd_start(m):
 
 @bot.callback_query_handler(lambda c: c.data == 'menu_comprar')
 def callback_menu_comprar(c):
-    try:
-        bot.answer_callback_query(c.id)
-    except Exception:
-        pass
+    try: bot.answer_callback_query(c.id)
+    except: pass
     show_comprar_menu(c.message.chat.id)
 
 @bot.message_handler(commands=['comprar'])
@@ -487,10 +385,8 @@ def cmd_comprar(m):
 
 @bot.callback_query_handler(lambda c: c.data == 'menu_recarregar')
 def menu_recarregar(c):
-    try:
-        bot.answer_callback_query(c.id)
-    except Exception:
-        pass
+    try: bot.answer_callback_query(c.id)
+    except: pass
     criar_usuario(c.from_user.id)
     PENDING_RECHARGE[c.from_user.id] = True
     bot.send_message(
@@ -521,26 +417,16 @@ def handle_recharge_amount(m):
         )
     )
     kb.row(
-        telebot.types.InlineKeyboardButton(
-            '📲 Comprar serviços', callback_data='menu_comprar'
-        ),
-        telebot.types.InlineKeyboardButton(
-            '📜 Menu', callback_data='menu'
-        )
+        telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
+        telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu')
     )
-    bot.send_message(
-        m.chat.id,
-        f"Para recarregar R$ {amount:.2f}, clique abaixo:",
-        reply_markup=kb
-    )
+    bot.send_message(m.chat.id, f"Para recarregar R$ {amount:.2f}, clique abaixo:", reply_markup=kb)
     send_menu(m.chat.id)
 
 @bot.callback_query_handler(lambda c: c.data == 'menu_saldo')
 def menu_saldo(c):
-    try:
-        bot.answer_callback_query(c.id)
-    except Exception:
-        pass
+    try: bot.answer_callback_query(c.id)
+    except: pass
     criar_usuario(c.from_user.id)
     s = carregar_usuario(c.from_user.id)['saldo']
     bot.send_message(c.message.chat.id, f"💰 Saldo: R$ {s:.2f}")
@@ -548,10 +434,8 @@ def menu_saldo(c):
 
 @bot.callback_query_handler(lambda c: c.data == 'menu_numeros')
 def menu_numeros(c):
-    try:
-        bot.answer_callback_query(c.id)
-    except Exception:
-        pass
+    try: bot.answer_callback_query(c.id)
+    except: pass
     criar_usuario(c.from_user.id)
     nums = carregar_usuario(c.from_user.id)['numeros']
     if not nums:
@@ -562,21 +446,15 @@ def menu_numeros(c):
             inf = status_map.get(aid)
             if inf:
                 txt += f"\n*ID:* `{aid}` `{inf['full']}` / `{inf['short']}`"
-        bot.send_message(
-            c.message.chat.id,
-            txt,
-            parse_mode='Markdown'
-        )
+        bot.send_message(c.message.chat.id, txt, parse_mode='Markdown')
     send_menu(c.message.chat.id)
 
 @bot.callback_query_handler(lambda c: c.data == 'menu_refer')
 def menu_refer(c):
-    try:
-        bot.answer_callback_query(c.id)
-    except Exception:
-        pass
+    try: bot.answer_callback_query(c.id)
+    except: pass
     u = carregar_usuario(c.from_user.id)
-    link = f"https://t.me/{bot.get_me().username}?start={c.from_user.id}"
+    link = get_user_ref_link(c.from_user.id)
     indicados = u.get("indicados", [])
     text = (
         f"📢 *Indique amigos e ganhe 10% de todas as recargas deles!*\n\n"
@@ -586,10 +464,8 @@ def menu_refer(c):
     if indicados:
         nomes = []
         for id_ in indicados:
-            try:
-                nomes.append(f"- {id_}")
-            except:
-                nomes.append(f"- {id_}")
+            try: nomes.append(f"- {id_}")
+            except: nomes.append(f"- {id_}")
         text += "\n" + "\n".join(nomes)
     bot.send_message(c.message.chat.id, text, parse_mode='Markdown')
     send_menu(c.message.chat.id)
@@ -627,10 +503,8 @@ def cb_comprar(c):
             c.message.message_id
         )
     except telebot.apihelper.ApiTelegramException as e:
-        if "message is not modified" not in str(e):
-            raise
-    except Exception:
-        pass
+        if "message is not modified" not in str(e): raise
+    except Exception: pass
     resp = {}
     for attempt in range(1, 14):
         resp = solicitar_numero(idsms[key], max_price=attempt)
@@ -641,9 +515,11 @@ def cb_comprar(c):
     aid   = resp['id']
     full  = resp['number']
     short = full[2:] if full.startswith('55') else full
-    adicionar_numero(user_id, aid)
-    registrar_numero_sms(aid, user_id, price)
-    alterar_saldo(user_id, balance - price)
+
+    ok = comprar_numero_atomico(user_id, aid, price)
+    if not ok:
+        return bot.send_message(c.message.chat.id, "⚠️ Erro ao descontar saldo ou duplicidade, tente novamente.")
+
     kb_blocked = telebot.types.InlineKeyboardMarkup()
     kb_blocked.row(
         telebot.types.InlineKeyboardButton(
@@ -651,26 +527,16 @@ def cb_comprar(c):
         )
     )
     kb_blocked.row(
-        telebot.types.InlineKeyboardButton(
-            '📲 Comprar serviços', callback_data='menu_comprar'
-        ),
-        telebot.types.InlineKeyboardButton(
-            '📜 Menu', callback_data='menu'
-        )
+        telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
+        telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu')
     )
     kb_unlocked = telebot.types.InlineKeyboardMarkup()
     kb_unlocked.row(
-        telebot.types.InlineKeyboardButton(
-            f'❌ Cancelar', callback_data=f'cancel_{aid}'
-        )
+        telebot.types.InlineKeyboardButton(f'❌ Cancelar', callback_data=f'cancel_{aid}')
     )
     kb_unlocked.row(
-        telebot.types.InlineKeyboardButton(
-            '📲 Comprar serviços', callback_data='menu_comprar'
-        ),
-        telebot.types.InlineKeyboardButton(
-            '📜 Menu', callback_data='menu'
-        )
+        telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
+        telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu')
     )
     text = (
         f"📦 {service}\n"
@@ -700,8 +566,7 @@ def cb_comprar(c):
             time.sleep(60)
             rem = PRAZO_MINUTOS - (minute + 1)
             info = status_map.get(aid)
-            if not info:
-                return
+            if not info: return
             new_text = (
                 f"📦 {service}\n"
                 f"☎️ Número: `{full}`\n"
@@ -719,10 +584,8 @@ def cb_comprar(c):
                     reply_markup=kb_sel
                 )
             except telebot.apihelper.ApiTelegramException as e:
-                if "message is not modified" not in str(e):
-                    raise
-            except Exception:
-                pass
+                if "message is not modified" not in str(e): raise
+            except Exception: pass
     def auto_cancel():
         time.sleep(PRAZO_SEGUNDOS)
         info = status_map.get(aid)
@@ -730,10 +593,8 @@ def cb_comprar(c):
             cancelar_numero(aid)
             ok = marcar_cancelado_e_devolver(info['user_id'], aid)
             if ok:
-                try:
-                    bot.delete_message(info['chat_id'], info['message_id'])
-                except:
-                    pass
+                try: bot.delete_message(info['chat_id'], info['message_id'])
+                except: pass
     threading.Thread(target=countdown, daemon=True).start()
     threading.Thread(target=auto_cancel, daemon=True).start()
 
@@ -746,8 +607,7 @@ def retry_sms(c):
             params={'api_key':API_KEY_SMSBOWER,'action':'setStatus','status':'3','id':aid},
             timeout=10
         )
-    except:
-        pass
+    except: pass
     bot.answer_callback_query(c.id, '🔄 Novo SMS solicitado.', show_alert=True)
     spawn_sms_thread(aid)
 
@@ -767,16 +627,89 @@ def cancelar_user(c):
     cancelar_numero(aid)
     ok = marcar_cancelado_e_devolver(info['user_id'], aid)
     if ok:
-        try:
-            bot.delete_message(info['chat_id'], info['message_id'])
-        except:
-            pass
+        try: bot.delete_message(info['chat_id'], info['message_id'])
+        except: pass
         bot.answer_callback_query(c.id, '✅ Cancelado e saldo devolvido.', show_alert=True)
     else:
         bot.answer_callback_query(c.id, '❌ Já cancelado anteriormente.', show_alert=True)
 
-# =============== FLASK APP ===============
+# =============== PAINEL ADMIN WEB ===============
+@app.route('/admin', methods=['GET', 'POST'])
+def painel_admin():
+    token = request.args.get('token', '')
+    if token != PAINEL_TOKEN:
+        return "Acesso negado.", 401
 
+    msg_feedback = ""
+    if request.method == 'POST':
+        action = request.form.get('action')
+        if action == 'enviar_mensagem':
+            texto = request.form.get('texto')
+            if texto:
+                with get_db_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT id FROM usuarios")
+                        uids = [row['id'] for row in cur.fetchall()]
+                enviados = 0
+                for uid in uids:
+                    try:
+                        bot.send_message(int(uid), texto)
+                        enviados += 1
+                    except: pass
+                msg_feedback = f'Mensagem enviada para {enviados} usuários.'
+        elif action == 'adicionar_saldo':
+            val = float(request.form.get('valor', '0'))
+            todos = request.form.get('todos')
+            uid  = request.form.get('userid')
+            with get_db_conn() as conn:
+                with conn.cursor() as cur:
+                    if todos:
+                        cur.execute("UPDATE usuarios SET saldo=saldo+%s", (val,))
+                        conn.commit()
+                        msg_feedback = f"Saldo de R$ {val:.2f} adicionado a TODOS os usuários."
+                    elif uid:
+                        cur.execute("UPDATE usuarios SET saldo=saldo+%s WHERE id=%s", (val, str(uid)))
+                        conn.commit()
+                        msg_feedback = f"Saldo de R$ {val:.2f} adicionado ao usuário {uid}."
+
+    # Estatísticas
+    with get_db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM numeros_sms")
+            total = cur.fetchone()['count']
+            cur.execute("SELECT count(*) FROM numeros_sms WHERE cancelado=TRUE")
+            cancelados = cur.fetchone()['count']
+            cur.execute("SELECT count(*) FROM numeros_sms WHERE sms_recebido=TRUE")
+            recebidos = cur.fetchone()['count']
+
+    return render_template_string("""
+        <h2>Painel Admin</h2>
+        <form method=post>
+            <h3>Enviar mensagem para todos:</h3>
+            <textarea name="texto" rows=3 cols=40 placeholder="Mensagem"></textarea><br>
+            <input type="hidden" name="action" value="enviar_mensagem">
+            <button type="submit">Enviar Mensagem</button>
+        </form>
+        <form method=post>
+            <h3>Adicionar saldo</h3>
+            <input type="hidden" name="action" value="adicionar_saldo">
+            Valor: <input name="valor" type="number" step="0.01" required>
+            <input type="checkbox" name="todos" value="1"> Para TODOS<br>
+            ou ID: <input name="userid" type="text" placeholder="UserID">
+            <button type="submit">Adicionar Saldo</button>
+        </form>
+        <hr>
+        <b>{{msg_feedback}}</b>
+        <hr>
+        <h3>Estatísticas</h3>
+        <ul>
+            <li>Total de números vendidos: {{total}}</li>
+            <li>Números cancelados: {{cancelados}}</li>
+            <li>Números que receberam SMS: {{recebidos}}</li>
+        </ul>
+    """, msg_feedback=msg_feedback, total=total, cancelados=cancelados, recebidos=recebidos)
+
+# =============== FLASK BOT / WEBHOOK ===============
 @app.route('/', methods=['GET'])
 def health():
     return 'OK', 200
@@ -811,24 +744,21 @@ def mp_webhook():
                             ref_user = carregar_usuario(refid)
                             if ref_user:
                                 bonus = round(amt * 0.10, 2)
-                                alterar_saldo(refid, ref_user['saldo'] + bonus)
+                                with get_db_conn() as conn:
+                                    with conn.cursor() as cur:
+                                        cur.execute("UPDATE usuarios SET saldo=saldo+%s WHERE id=%s", (bonus, str(refid)))
+                                        conn.commit()
                                 try:
-                                    bot.send_message(
-                                        int(refid),
-                                        f"🎉 Você ganhou R$ {bonus:.2f} de bônus pois seu indicado recarregou saldo!"
-                                    )
-                                except:
-                                    pass
+                                    bot.send_message(int(refid), f"🎉 Você ganhou R$ {bonus:.2f} de bônus pois seu indicado recarregou saldo!")
+                                except: pass
                                 ref_text = f"\nIndicado por: {refid}\nBônus enviado: R$ {bonus:.2f}"
-                        alterar_saldo(uid, current + amt)
-                        bot.send_message(
-                            uid,
-                            f"✅ Recarga de R$ {amt:.2f} confirmada! Seu novo saldo é R$ {current + amt:.2f}"
-                        )
-                        # Notifica no bot admin de depósito
+                        with get_db_conn() as conn:
+                            with conn.cursor() as cur:
+                                cur.execute("UPDATE usuarios SET saldo=saldo+%s WHERE id=%s", (amt, str(uid)))
+                                conn.commit()
+                        bot.send_message(uid, f"✅ Recarga de R$ {amt:.2f} confirmada! Seu novo saldo é R$ {current + amt:.2f}")
                         try:
-                            admin_bot.send_message(
-                                ADMIN_CHAT_ID,
+                            admin_bot.send_message(ADMIN_CHAT_ID,
                                 f"💰 Novo DEPÓSITO\nUser: {uid}\nValor: R$ {amt:.2f}\nData: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}{ref_text}"
                             )
                         except Exception as e:

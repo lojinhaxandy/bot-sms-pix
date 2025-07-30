@@ -163,7 +163,17 @@ def exportar_backup_json():
                 u['indicados'] = json.loads(u.get('indicados', '[]'))
             with open("usuarios_backup.json", "w") as f:
                 json.dump(users, f, indent=2, ensure_ascii=False)
-            enviar_documento_bot(backup_bot, BACKUP_CHAT_ID, "usuarios_backup.json")
+
+    # ENVIA EM THREAD PARA NÃO TRAVAR
+    def send_backup():
+        for _ in range(3):  # tenta até 3x se falhar
+            try:
+                with open("usuarios_backup.json", "rb") as bf:
+                    backup_bot.send_document(BACKUP_CHAT_ID, bf)
+                break
+            except Exception as e:
+                time.sleep(2)
+    threading.Thread(target=send_backup, daemon=True).start()
 
 # Compra atômica (evita duplicidade)
 def comprar_numero_atomico(uid, aid, price):

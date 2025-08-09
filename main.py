@@ -223,8 +223,9 @@ def solicitar_numero(servico, max_price=None):
         'service': servico,
         'country': COUNTRY_ID
     }
-    if max_price:
-        params['maxPrice'] = str(max_price)
+    # A SMSBower mudou para USD: passamos maxPrice diretamente em dólares quando informado
+    if max_price is not None:
+        params['maxPrice'] = f"{max_price:.2f}"
     try:
         r = requests.get(SMSBOWER_URL, params=params, timeout=15)
         r.raise_for_status()
@@ -381,7 +382,7 @@ def show_comprar_menu(chat_id):
         telebot.types.InlineKeyboardButton('📲 Mercado Pago SMS - R$0.75', callback_data='comprar_mercado'),
         telebot.types.InlineKeyboardButton('🇨🇳 SMS para China   - R$0.60', callback_data='comprar_china'),
         telebot.types.InlineKeyboardButton('💸 PicPay SMS       - R$0.65', callback_data='comprar_picpay'),
-        telebot.types.InlineKeyboardButton('📡 Outros SMS        - R$0.90', callback_data='comprar_outros')
+        telebot.types.InlineKeyboardButton('📡 Outros SMS        - R$1.10', callback_data='comprar_outros')  # atualizado 0.9 -> 1.1
     )
     bot.send_message(chat_id, 'Escolha serviço:', reply_markup=kb)
 
@@ -495,11 +496,12 @@ def menu_refer(c):
 def cb_comprar(c):
     user_id, key = c.from_user.id, c.data.split('_')[1]
     criar_usuario(user_id)
+    # preços do usuário (mantidos, exceto 'outros' alterado para 1.10 conforme pedido)
     prices = {
         'mercado':0.75,
-        'china':0.6,
+        'china':0.60,
         'picpay':0.65,
-        'outros':0.90
+        'outros':1.10  # alterado 0.9 -> 1.1
     }
     names  = {
         'mercado':'Mercado Pago SMS',
@@ -526,13 +528,22 @@ def cb_comprar(c):
     except telebot.apihelper.ApiTelegramException as e:
         if "message is not modified" not in str(e): raise
     except Exception: pass
+
+    # ===== Tentativas de menor preço para maior (em USD) =====
+    attempt_prices = []
+    if key in ('mercado', 'picpay', 'china'):
+        attempt_prices = [round(i/100, 2) for i in range(1, 10+1)]  # 0.01 .. 0.10
+    else:  # 'outros'
+        attempt_prices = [round(i/100, 2) for i in range(1, 19+1)]  # 0.01 .. 0.19
+
     resp = {}
-    for attempt in range(1, 14):
-        resp = solicitar_numero(idsms[key], max_price=attempt)
+    for mp in attempt_prices:
+        resp = solicitar_numero(idsms[key], max_price=mp)
         if resp.get('status') == 'success':
             break
     if resp.get('status') != 'success':
         return bot.send_message(c.message.chat.id, '🚫 Sem números disponíveis.')
+
     aid   = resp['id']
     full  = resp['number']
     short = full[2:] if full.startswith('55') else full

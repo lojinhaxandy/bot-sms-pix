@@ -223,9 +223,9 @@ def solicitar_numero(servico, max_price=None):
         'service': servico,
         'country': COUNTRY_ID
     }
-    # A SMSBower mudou para USD: passamos maxPrice diretamente em dólares quando informado
+    # Envia maxPrice em USD (3 casas decimais para suportar 0.001)
     if max_price is not None:
-        params['maxPrice'] = f"{max_price:.2f}"
+        params['maxPrice'] = f"{max_price:.3f}"
     try:
         r = requests.get(SMSBOWER_URL, params=params, timeout=15)
         r.raise_for_status()
@@ -381,6 +381,7 @@ def show_comprar_menu(chat_id):
     kb.add(
         telebot.types.InlineKeyboardButton('📲 Mercado Pago SMS - R$0.75', callback_data='comprar_mercado'),
         telebot.types.InlineKeyboardButton('🇨🇳 SMS para China   - R$0.60', callback_data='comprar_china'),
+        telebot.types.InlineKeyboardButton('🇨🇳 SMS para China 2 - R$0.60', callback_data='comprar_china2'),
         telebot.types.InlineKeyboardButton('💸 PicPay SMS       - R$0.65', callback_data='comprar_picpay'),
         telebot.types.InlineKeyboardButton('📡 Outros SMS        - R$1.10', callback_data='comprar_outros')  # atualizado 0.9 -> 1.1
     )
@@ -496,22 +497,25 @@ def menu_refer(c):
 def cb_comprar(c):
     user_id, key = c.from_user.id, c.data.split('_')[1]
     criar_usuario(user_id)
-    # preços do usuário (mantidos, exceto 'outros' alterado para 1.10 conforme pedido)
+    # preços do usuário (mantidos, exceto 'outros' alterado para 1.10; novo china2 = 0.60)
     prices = {
         'mercado':0.75,
         'china':0.60,
+        'china2':0.60,
         'picpay':0.65,
         'outros':1.10  # alterado 0.9 -> 1.1
     }
     names  = {
         'mercado':'Mercado Pago SMS',
         'china':'SMS para China',
+        'china2':'SMS para China 2',
         'picpay':'PicPay SMS',
         'outros':'Outros SMS'
     }
     idsms  = {
         'mercado':'cq',
-        'china':'ya',
+        'china':'ev',
+        'china2':'hw',  # novo serviço
         'picpay':'ev',
         'outros':'ot'
     }
@@ -531,7 +535,10 @@ def cb_comprar(c):
 
     # ===== Tentativas de menor preço para maior (em USD) =====
     attempt_prices = []
-    if key in ('mercado', 'picpay', 'china'):
+    if key == 'china2':
+        # 0.001 .. 0.100 (passo 0.001)
+        attempt_prices = [round(i/1000, 3) for i in range(1, 100+1)]
+    elif key in ('mercado', 'picpay', 'china'):
         attempt_prices = [round(i/100, 2) for i in range(1, 10+1)]  # 0.01 .. 0.10
     else:  # 'outros'
         attempt_prices = [round(i/100, 2) for i in range(1, 19+1)]  # 0.01 .. 0.19

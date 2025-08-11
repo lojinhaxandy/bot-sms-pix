@@ -511,7 +511,7 @@ def cb_comprar(c):
     }
     idsms  = {
         'mercado':'cq',
-        'china':'ev',
+        'china':'ya',
         'picpay':'ev',
         'outros':'ot'
     }

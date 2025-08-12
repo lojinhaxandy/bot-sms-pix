@@ -32,6 +32,10 @@ DATABASE_URL      = os.getenv("DATABASE_URL")
 PAINEL_TOKEN      = os.getenv("PAINEL_TOKEN") or "painel2024"
 SERVICES_JSON     = os.getenv("SERVICES_JSON") or "services.json"  # caminho do JSON que você já tem
 
+# >>> NOVO: API sms24h (Servidor 2) — sem default (apenas env)
+SMS24H_URL        = "https://api.sms24h.org/stubs/handler_api"
+API_KEY_SMS24H    = os.getenv("API_KEY_SMS24H")  # defina no ambiente
+
 # =========================================================
 # =========== BOTS / SDK / FLASK (mantidos) ===============
 # =========================================================
@@ -49,7 +53,6 @@ def get_db_conn():
     return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
 
 def criar_tabela_usuarios():
-    # cria se não existir (evita erro em instalações novas)
     with get_db_conn() as conn, conn.cursor() as cur:
         cur.execute("""
             CREATE TABLE IF NOT EXISTS usuarios (
@@ -78,7 +81,6 @@ def criar_tabela_numeros_sms():
             conn.commit()
 
 def criar_tabela_payments():
-    # guarda payments processados pra não creditar duas vezes (idempotência)
     with get_db_conn() as conn, conn.cursor() as cur:
         cur.execute("""
             CREATE TABLE IF NOT EXISTS payments (
@@ -89,7 +91,6 @@ def criar_tabela_payments():
         """)
         conn.commit()
 
-# cria tabelas
 criar_tabela_usuarios()
 criar_tabela_numeros_sms()
 criar_tabela_payments()
@@ -125,7 +126,6 @@ def load_services_index(path=SERVICES_JSON):
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         index = {}
-        # arquivo vem como { "1": {...}, "2": {...}, ... }
         for sid, payload in data.items():
             index[str(sid)] = {
                 "title": payload.get("title"),
@@ -139,12 +139,11 @@ def load_services_index(path=SERVICES_JSON):
 
 load_services_index()
 
-# Mapa original usado no teu callback (agora com chave dinâmica para china2)
 SERVICE_CODE_LOCK = threading.Lock()
 GLOBAL_SERVICE_MAP = {
     'mercado': 'cq',
     'china':   'ev',
-    'china2':  'ki',   # será atualizado pelo scanner
+    'china2':  'ki',   # atualizado pelo scanner
     'picpay':  'ev',
     'outros':  'ot'
 }
@@ -153,7 +152,7 @@ def get_service_code(key):
     with SERVICE_CODE_LOCK:
         return GLOBAL_SERVICE_MAP.get(key)
 
-# preço atual escolhido pelo scanner para china2
+# >>> preço atual escolhido pelo scanner p/ china2
 SCANNER_LAST_PRICE = None
 SCANNER_PRICE_LOCK = threading.Lock()
 
@@ -161,7 +160,6 @@ def set_china2_service_code(new_code, reason="", price=None):
     with SERVICE_CODE_LOCK:
         old = GLOBAL_SERVICE_MAP['china2']
         GLOBAL_SERVICE_MAP['china2'] = new_code
-    # guarda o preço escolhido pelo scanner (se vier)
     if price is not None:
         try:
             p = float(price)
@@ -237,7 +235,6 @@ def criar_usuario(uid, refer=None):
             """, (str(uid), 0.0, json.dumps([]), refer, json.dumps([])))
             conn.commit()
             logger.info(f"Novo usuário criado: {uid}")
-            # Indicação
             if refer and str(refer) != str(uid):
                 cur.execute("SELECT indicados FROM usuarios WHERE id=%s", (str(refer),))
                 result = cur.fetchone()
@@ -302,7 +299,7 @@ def marcar_cancelado_e_devolver(uid, aid):
             if not row or row['cancelado']:
                 return False
             price = row['price']
-            cur.execute("UPDATE numeros_sms SET cancelado=TRUE WHERE aid=%s", (aid,))
+            cur.execute("UPDATE numeros_sms SET cancelado=TRUE WHERE id=%s", (aid,))
             cur.execute("UPDATE usuarios SET saldo=saldo+%s WHERE id=%s", (price, str(uid)))
             conn.commit()
     exportar_backup_json()
@@ -311,7 +308,7 @@ def marcar_cancelado_e_devolver(uid, aid):
 def registrar_sms_recebido(aid):
     with get_db_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("UPDATE numeros_sms SET sms_recebido=TRUE WHERE aid=%s", (aid,))
+            cur.execute("UPDATE numeros_sms SET sms_recebido=TRUE WHERE id=%s", (aid,))
             conn.commit()
 
 # =========================================================
@@ -336,7 +333,7 @@ def enviar_documento_bot(bot_instance, chat_id, file_path, tentativas=3):
             time.sleep(1)
     return False
 
-def solicitar_numero(servico, max_price=None):
+def solicitar_numero_smsbower(servico, max_price=None):
     params = {
         'api_key': API_KEY_SMSBOWER,
         'action': 'getNumber',
@@ -344,32 +341,32 @@ def solicitar_numero(servico, max_price=None):
         'country': COUNTRY_ID
     }
     if max_price is not None:
-        params['maxPrice'] = f"{max_price:.4f}"  # 4 casas pra garantir
+        params['maxPrice'] = f"{max_price:.4f}"
     try:
         r = requests.get(SMSBOWER_URL, params=params, timeout=15)
         r.raise_for_status()
         text = r.text.strip()
-        logger.info(f"GET_NUMBER → {text}")
+        logger.info(f"GET_NUMBER (smsbower) → {text}")
     except Exception as e:
-        logger.error(f"Erro getNumber: {e}")
+        logger.error(f"Erro getNumber smsbower: {e}")
         return {"status":"error","message":str(e)}
     if text.startswith("ACCESS_NUMBER:"):
         _, aid, num = text.split(":", 2)
         return {"status":"success","id":aid,"number":num}
     return {"status":"error","message":text}
 
-def cancelar_numero(aid):
+def cancelar_numero_smsbower(aid):
     try:
         requests.get(
             SMSBOWER_URL,
             params={'api_key':API_KEY_SMSBOWER, 'action':'setStatus','status':'8','id':aid},
             timeout=10
         )
-        logger.info(f"Cancelado provider: {aid}")
+        logger.info(f"Cancelado provider (smsbower): {aid}")
     except Exception as e:
-        logger.error(f"Erro cancelar: {e}")
+        logger.error(f"Erro cancelar smsbower: {e}")
 
-def obter_status(aid):
+def obter_status_smsbower(aid):
     try:
         r = requests.get(
             SMSBOWER_URL,
@@ -379,99 +376,92 @@ def obter_status(aid):
         r.raise_for_status()
         return r.text.strip()
     except Exception as e:
-        logger.error(f"Erro getStatus: {e}")
+        logger.error(f"Erro getStatus smsbower: {e}")
         return None
 
-def spawn_sms_thread(aid):
-    with status_lock:
-        info = status_map.get(aid)
-    if not info:
+# ============== SMS24H (Servidor 2) ======================
+def sms24h_key_ok():
+    if not API_KEY_SMS24H:
+        logger.error("[sms24h] API_KEY_SMS24H não definido no ambiente")
+        return False
+    return True
+
+def solicitar_numero_sms24h(service_code, operator="tim", country="73"):
+    if not sms24h_key_ok():
+        return {"status":"error","message":"NO_KEY"}
+    for op in [operator, "any"]:
+        try:
+            r = requests.get(
+                SMS24H_URL,
+                params={
+                    'api_key': API_KEY_SMS24H,
+                    'action': 'getNumber',
+                    'service': service_code,
+                    'operator': op,
+                    'country': country
+                },
+                timeout=15
+            )
+            r.raise_for_status()
+            text = r.text.strip()
+            logger.info(f"GET_NUMBER (sms24h {op}) → {text}")
+        except Exception as e:
+            logger.error(f"Erro getNumber sms24h ({op}): {e}")
+            continue
+        if text.startswith("ACCESS_NUMBER:"):
+            _, aid, num = text.split(":", 2)
+            return {"status":"success","id":aid,"number":num}
+    return {"status":"error","message":"NO_NUMBERS"}
+
+def obter_status_sms24h(aid):
+    if not sms24h_key_ok():
+        return None
+    try:
+        r = requests.get(
+            SMS24H_URL,
+            params={'api_key': API_KEY_SMS24H, 'action': 'getStatus', 'id': aid},
+            timeout=10
+        )
+        r.raise_for_status()
+        return r.text.strip()
+    except Exception as e:
+        logger.error(f"Erro getStatus sms24h: {e}")
+        return None
+
+def set_status_sms24h(aid, status):
+    """
+    status: 1 (SMS enviado), 3 (repetir SMS), 6 (finalizar), 8 (cancelar)
+    """
+    if not sms24h_key_ok():
+        return None
+    try:
+        r = requests.get(
+            SMS24H_URL,
+            params={'api_key': API_KEY_SMS24H, 'action': 'setStatus', 'status': status, 'id': aid},
+            timeout=10
+        )
+        r.raise_for_status()
+        txt = r.text.strip()
+        logger.info(f"setStatus sms24h({status}) → {txt}")
+        return txt
+    except Exception as e:
+        logger.error(f"Erro setStatus sms24h: {e}")
+        return None
+
+# >>> dispatcher de status por provider
+def obter_status(aid, provider):
+    if provider == 'sms24h':
+        return obter_status_sms24h(aid)
+    return obter_status_smsbower(aid)
+
+def cancelar_numero(aid, provider):
+    if provider == 'sms24h':
+        set_status_sms24h(aid, 8)  # cancelar
         return
+    cancelar_numero_smsbower(aid)
 
-    service = info['service']
-    full    = info['full']
-    short   = info['short']
-    chat_id = info['chat_id']
-    msg_id  = info.get('sms_message_id')
-    info.setdefault('codes', [])
-    info['canceled_by_user'] = False
-
-    def check_sms():
-        start = time.time()
-        while time.time() - start < PRAZO_SEGUNDOS:
-            status = obter_status(aid)
-            if info['canceled_by_user']:
-                return
-            if not status or status.startswith('STATUS_WAIT'):
-                time.sleep(5)
-                continue
-            if status == 'STATUS_CANCEL':
-                if not info['codes']:
-                    ok = marcar_cancelado_e_devolver(info['user_id'], aid)
-                    if ok:
-                        bot.send_message(
-                            chat_id,
-                            f"❌ Cancelado pelo provider. R${info['price']:.2f} devolvido."
-                        )
-                return
-            code = status.split(':', 1)[1] if ':' in status else status
-            if code not in info['codes']:
-                info['codes'].append(code)
-                registrar_sms_recebido(aid)
-                rt = datetime.now().strftime('%d/%m/%Y %H:%M:%S')
-                text = (
-                    f"📦 {service}\n"
-                    f"☎️ Número: `{full}`\n"
-                    f"☎️ Sem DDI: `{short}`\n\n"
-                )
-                for idx, cd in enumerate(info['codes'], 1):
-                    text += f"📩 SMS{idx}: `{cd}`\n"
-                text += f"🕘 {rt}"
-                kb = telebot.types.InlineKeyboardMarkup()
-                kb.row(
-                    telebot.types.InlineKeyboardButton(
-                        '📲 Receber outro SMS',
-                        callback_data=f'retry_{aid}'
-                    )
-                )
-                kb.row(
-                    telebot.types.InlineKeyboardButton(
-                        '📲 Comprar serviços', callback_data='menu_comprar'
-                    ),
-                    telebot.types.InlineKeyboardButton(
-                        '📜 Menu', callback_data='menu'
-                    )
-                )
-                try:
-                    if msg_id:
-                        bot.edit_message_text(
-                            text, chat_id, msg_id,
-                            parse_mode='Markdown',
-                            reply_markup=kb
-                        )
-                    else:
-                        m = bot.send_message(
-                            chat_id, text,
-                            parse_mode='Markdown',
-                            reply_markup=kb
-                        )
-                        info['sms_message_id'] = m.message_id
-                except telebot.apihelper.ApiTelegramException as e:
-                    if "message is not modified" not in str(e):
-                        raise
-                except Exception:
-                    pass
-            time.sleep(5)
-    threading.Thread(target=check_sms, daemon=True).start()
-
-# ========= NOVO: pegar menor preço via getPricesV2 =======
+# ========= menor preço via getPricesV2 (smsbower) =========
 def obter_menor_preco_v2(service_code, country_id):
-    """
-    Chama action=getPricesV2 e retorna o menor preço disponível (float)
-    para o service_code/country_id. Retorna None se não houver.
-    Exemplo de resposta:
-      {"73":{"ev":{"0.0683":18,"0.5011":469021}}}
-    """
     try:
         r = requests.get(
             SMSBOWER_URL,
@@ -494,7 +484,6 @@ def obter_menor_preco_v2(service_code, country_id):
     if not isinstance(svc_map, dict) or not svc_map:
         return None
 
-    # filtra buckets com quantidade > 0 e ordena pelo preço (chave)
     candidatos = []
     for price_str, qty in svc_map.items():
         try:
@@ -512,8 +501,7 @@ def obter_menor_preco_v2(service_code, country_id):
         return None
 
     candidatos.sort()
-    menor = candidatos[0]
-    return menor
+    return candidatos[0]
 
 # =========================================================
 # ====================== MENUS (iguais) ===================
@@ -521,24 +509,12 @@ def obter_menor_preco_v2(service_code, country_id):
 def send_menu(chat_id):
     kb = telebot.types.InlineKeyboardMarkup(row_width=1)
     kb.add(
-        telebot.types.InlineKeyboardButton(
-            '📲 Comprar serviços', callback_data='menu_comprar'
-        ),
-        telebot.types.InlineKeyboardButton(
-            '💰 Saldo', callback_data='menu_saldo'
-        ),
-        telebot.types.InlineKeyboardButton(
-            '🤑 Recarregar', callback_data='menu_recarregar'
-        ),
-        telebot.types.InlineKeyboardButton(
-            '👥 Referências', callback_data='menu_refer'
-        ),
-        telebot.types.InlineKeyboardButton(
-            '📜 Meus números', callback_data='menu_numeros'
-        ),
-        telebot.types.InlineKeyboardButton(
-            '🆘 Suporte', url='https://t.me/cpfbotttchina'
-        )
+        telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
+        telebot.types.InlineKeyboardButton('💰 Saldo', callback_data='menu_saldo'),
+        telebot.types.InlineKeyboardButton('🤑 Recarregar', callback_data='menu_recarregar'),
+        telebot.types.InlineKeyboardButton('👥 Referências', callback_data='menu_refer'),
+        telebot.types.InlineKeyboardButton('📜 Meus números', callback_data='menu_numeros'),
+        telebot.types.InlineKeyboardButton('🆘 Suporte', url='https://t.me/cpfbotttchina')
     )
     bot.send_message(chat_id, 'Escolha uma opção:', reply_markup=kb)
 
@@ -555,7 +531,9 @@ def show_comprar_menu(chat_id):
         telebot.types.InlineKeyboardButton('🇨🇳 SMS para China   - R$0.60', callback_data='comprar_china'),
         telebot.types.InlineKeyboardButton('🇨🇳 SMS para China 2 - R$0.60', callback_data='comprar_china2'),
         telebot.types.InlineKeyboardButton('💸 PicPay SMS       - R$0.65', callback_data='comprar_picpay'),
-        telebot.types.InlineKeyboardButton('📡 Outros SMS        - R$1.10', callback_data='comprar_outros')
+        telebot.types.InlineKeyboardButton('📡 Outros SMS        - R$1.10', callback_data='comprar_outros'),
+        # >>> NOVO botão
+        telebot.types.InlineKeyboardButton('🛰️ SMS Servidor 2    - R$0.77', callback_data='comprar_srv2')
     )
     bot.send_message(chat_id, 'Escolha serviço:', reply_markup=kb)
 
@@ -584,10 +562,7 @@ def menu_recarregar(c):
     except: pass
     criar_usuario(c.from_user.id)
     PENDING_RECHARGE[c.from_user.id] = True
-    bot.send_message(
-        c.message.chat.id,
-        'Digite o valor (em reais) que deseja recarregar:'
-    )
+    bot.send_message(c.message.chat.id, 'Digite o valor (em reais) que deseja recarregar:')
 
 @bot.message_handler(func=lambda m: PENDING_RECHARGE.get(m.from_user.id) and re.fullmatch(r"\d+(\.\d{1,2})?", m.text or ""))
 def handle_recharge_amount(m):
@@ -606,11 +581,7 @@ def handle_recharge_amount(m):
     })
     pay_url = pref["response"]["init_point"]
     kb = telebot.types.InlineKeyboardMarkup()
-    kb.row(
-        telebot.types.InlineKeyboardButton(
-            f"💳 Pagar R$ {amount:.2f}", url=pay_url
-        )
-    )
+    kb.row(telebot.types.InlineKeyboardButton(f"💳 Pagar R$ {amount:.2f}", url=pay_url))
     kb.row(
         telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
         telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu')
@@ -666,7 +637,7 @@ def menu_refer(c):
     send_menu(c.message.chat.id)
 
 # =========================================================
-# ================ COMPRAR (com getPricesV2) ==============
+# ================ COMPRAR (com V2 + srv2) ================
 # =========================================================
 @bot.callback_query_handler(lambda c: c.data.startswith('comprar_'))
 def cb_comprar(c):
@@ -677,22 +648,26 @@ def cb_comprar(c):
         'china':0.60,
         'china2':0.60,
         'picpay':0.65,
-        'outros':1.10
+        'outros':1.10,
+        'srv2':0.77  # NOVO
     }
     names  = {
         'mercado':'Mercado Pago SMS',
         'china':'SMS para China',
         'china2':'SMS para China 2',
         'picpay':'PicPay SMS',
-        'outros':'Outros SMS'
+        'outros':'Outros SMS',
+        'srv2':'SMS Servidor 2'
     }
     idsms  = {
         'mercado': get_service_code('mercado'),
         'china':   get_service_code('china'),
         'china2':  get_service_code('china2'),
         'picpay':  get_service_code('picpay'),
-        'outros':  get_service_code('outros')
+        'outros':  get_service_code('outros'),
+        'srv2':    'ot'  # sms24h
     }
+
     balance = carregar_usuario(user_id)['saldo']
     price, service = prices[key], names[key]
     if balance < price:
@@ -704,27 +679,104 @@ def cb_comprar(c):
     except Exception:
         pass
 
-    # ====== NOVO: determinar max_price ======
+    # ============ fluxo especial: SMS Servidor 2 (sms24h) ============
+    if key == 'srv2':
+        resp = solicitar_numero_sms24h(idsms[key], operator="tim", country=COUNTRY_ID)
+        if resp.get('status') != 'success':
+            return bot.send_message(c.message.chat.id, '🚫 Sem números disponíveis.')
+        aid   = resp['id']
+        full  = resp['number']
+        short = full[2:] if full.startswith('55') else full
+
+        ok = comprar_numero_atomico(user_id, aid, price)
+        if not ok:
+            return bot.send_message(c.message.chat.id, "⚠️ Erro ao descontar saldo ou duplicidade, tente novamente.")
+
+        kb_blocked = telebot.types.InlineKeyboardMarkup()
+        kb_blocked.row(telebot.types.InlineKeyboardButton('❌ Cancelar (2m)', callback_data=f'cancel_blocked_{aid}'))
+        kb_blocked.row(
+            telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
+            telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu')
+        )
+        kb_unlocked = telebot.types.InlineKeyboardMarkup()
+        kb_unlocked.row(telebot.types.InlineKeyboardButton('❌ Cancelar', callback_data=f'cancel_{aid}'))
+        kb_unlocked.row(
+            telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
+            telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu')
+        )
+        text = (
+            f"📦 {service}\n"
+            f"☎️ Número: `{full}`\n"
+            f"☎️ Sem DDI: `{short}`\n\n"
+            f"🕘 Prazo: {PRAZO_MINUTOS} minutos\n\n"
+            f"💡 Ativo por {PRAZO_MINUTOS} minutos; sem SMS, saldo devolvido automaticamente."
+        )
+        msg = bot.send_message(c.message.chat.id, text, parse_mode='Markdown', reply_markup=kb_blocked)
+        status_map[aid] = {
+            'user_id':    user_id,
+            'price':      price,
+            'chat_id':    msg.chat.id,
+            'message_id': msg.message_id,
+            'service':    service,
+            'full':       full,
+            'short':      short,
+            'provider':   'sms24h'
+        }
+        spawn_sms_thread(aid)
+        def countdown():
+            for minute in range(PRAZO_MINUTOS):
+                time.sleep(60)
+                rem = PRAZO_MINUTOS - (minute + 1)
+                info = status_map.get(aid)
+                if not info: return
+                new_text = (
+                    f"📦 {service}\n"
+                    f"☎️ Número: `{full}`\n"
+                    f"☎️ Sem DDI: `{short}`\n\n"
+                    f"🕘 Prazo: {rem} minutos\n\n"
+                    f"💡 Ativo por {PRAZO_MINUTOS} minutos; sem SMS, saldo devolvido automaticamente."
+                )
+                kb_sel = kb_blocked if minute < 2 else kb_unlocked
+                try:
+                    bot.edit_message_text(new_text, info['chat_id'], info['message_id'], parse_mode='Markdown', reply_markup=kb_sel)
+                except telebot.apihelper.ApiTelegramException as e:
+                    if "message is not modified" not in str(e): raise
+                except Exception:
+                    pass
+        def auto_cancel():
+            time.sleep(PRAZO_SEGUNDOS)
+            info = status_map.get(aid)
+            if info and not info.get('codes') and not info.get('canceled_by_user'):
+                # sms24h: cancelar via setStatus=8 antes de reembolsar
+                cancelar_numero(aid, provider='sms24h')
+                ok2 = marcar_cancelado_e_devolver(info['user_id'], aid)
+                if ok2:
+                    try: bot.delete_message(info['chat_id'], info['message_id'])
+                    except: pass
+        threading.Thread(target=countdown, daemon=True).start()
+        threading.Thread(target=auto_cancel, daemon=True).start()
+        return
+
+    # ================== fluxo normal (smsbower) ==================
+    # determinar menor preço
     max_price = None
     if key == 'china2':
-        # usa SEMPRE o preço que o scanner definiu, se houver
         with SCANNER_PRICE_LOCK:
             mp = SCANNER_LAST_PRICE
         if mp is not None:
             max_price = float(mp)
         else:
-            # fallback: pega menor preço disponível via V2
             max_price = obter_menor_preco_v2(idsms[key], COUNTRY_ID)
     else:
-        # outros serviços: sempre via V2
         max_price = obter_menor_preco_v2(idsms[key], COUNTRY_ID)
 
-    # regra: se não tiver preço elegível ou for > 0.1, não compra
-    if (max_price is None) or (float(max_price) > 0.1):
-        return bot.send_message(c.message.chat.id, '🚫 Sem números disponíveis no preço permitido.')
+    # limite por serviço: outros até 0.20, demais até 0.10
+    limite = 0.20 if key == 'outros' else 0.10
 
-    # ===== tentar comprar com o menor preço =====
-    resp = solicitar_numero(idsms[key], max_price=float(max_price))
+    if (max_price is None) or (float(max_price) > limite):
+        return bot.send_message(c.message.chat.id, '🚫 Sem números disponíveis.')
+
+    resp = solicitar_numero_smsbower(idsms[key], max_price=float(max_price))
     if resp.get('status') != 'success':
         return bot.send_message(c.message.chat.id, '🚫 Sem números disponíveis.')
 
@@ -737,17 +789,13 @@ def cb_comprar(c):
         return bot.send_message(c.message.chat.id, "⚠️ Erro ao descontar saldo ou duplicidade, tente novamente.")
 
     kb_blocked = telebot.types.InlineKeyboardMarkup()
-    kb_blocked.row(
-        telebot.types.InlineKeyboardButton(f'❌ Cancelar (2m)', callback_data=f'cancel_blocked_{aid}')
-    )
+    kb_blocked.row(telebot.types.InlineKeyboardButton('❌ Cancelar (2m)', callback_data=f'cancel_blocked_{aid}'))
     kb_blocked.row(
         telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
         telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu')
     )
     kb_unlocked = telebot.types.InlineKeyboardMarkup()
-    kb_unlocked.row(
-        telebot.types.InlineKeyboardButton(f'❌ Cancelar', callback_data=f'cancel_{aid}')
-    )
+    kb_unlocked.row(telebot.types.InlineKeyboardButton('❌ Cancelar', callback_data=f'cancel_{aid}'))
     kb_unlocked.row(
         telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
         telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu')
@@ -767,7 +815,8 @@ def cb_comprar(c):
         'message_id': msg.message_id,
         'service':    service,
         'full':       full,
-        'short':      short
+        'short':      short,
+        'provider':   'smsbower'
     }
     spawn_sms_thread(aid)
 
@@ -788,8 +837,7 @@ def cb_comprar(c):
             try:
                 bot.edit_message_text(new_text, info['chat_id'], info['message_id'], parse_mode='Markdown', reply_markup=kb_sel)
             except telebot.apihelper.ApiTelegramException as e:
-                if "message is not modified" not in str(e):
-                    raise
+                if "message is not modified" not in str(e): raise
             except Exception:
                 pass
 
@@ -797,7 +845,7 @@ def cb_comprar(c):
         time.sleep(PRAZO_SEGUNDOS)
         info = status_map.get(aid)
         if info and not info.get('codes') and not info.get('canceled_by_user'):
-            cancelar_numero(aid)
+            cancelar_numero(aid, provider='smsbower')
             ok2 = marcar_cancelado_e_devolver(info['user_id'], aid)
             if ok2:
                 try: bot.delete_message(info['chat_id'], info['message_id'])
@@ -806,18 +854,91 @@ def cb_comprar(c):
     threading.Thread(target=countdown, daemon=True).start()
     threading.Thread(target=auto_cancel, daemon=True).start()
 
+# =========================================================
+# ===================== STATUS / CANCEL ===================
+# =========================================================
+def spawn_sms_thread(aid):
+    with status_lock:
+        info = status_map.get(aid)
+    if not info:
+        return
+
+    provider = info.get('provider', 'smsbower')
+    service  = info['service']
+    full     = info['full']
+    short    = info['short']
+    chat_id  = info['chat_id']
+    msg_id   = info.get('sms_message_id')
+    info.setdefault('codes', [])
+    info['canceled_by_user'] = False
+
+    def check_sms():
+        start = time.time()
+        while time.time() - start < PRAZO_SEGUNDOS:
+            status = obter_status(aid, provider)
+            if info['canceled_by_user']:
+                return
+            if not status or status.startswith('STATUS_WAIT'):
+                time.sleep(5)
+                continue
+            if status == 'STATUS_CANCEL':
+                if not info['codes']:
+                    ok = marcar_cancelado_e_devolver(info['user_id'], aid)
+                    if ok:
+                        bot.send_message(chat_id, f"❌ Cancelado pelo provider. R${info['price']:.2f} devolvido.")
+                return
+            code = status.split(':', 1)[1] if ':' in status else status
+            if code not in info['codes']:
+                info['codes'].append(code)
+                registrar_sms_recebido(aid)
+                rt = datetime.now().strftime('%d/%m/%Y %H:%M:%S')
+                text = (
+                    f"📦 {service}\n"
+                    f"☎️ Número: `{full}`\n"
+                    f"☎️ Sem DDI: `{short}`\n\n"
+                )
+                for idx, cd in enumerate(info['codes'], 1):
+                    text += f"📩 SMS{idx}: `{cd}`\n"
+                text += f"🕘 {rt}"
+                kb = telebot.types.InlineKeyboardMarkup()
+                kb.row(telebot.types.InlineKeyboardButton('📲 Receber outro SMS', callback_data=f'retry_{aid}'))
+                kb.row(
+                    telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
+                    telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu')
+                )
+                try:
+                    if msg_id:
+                        bot.edit_message_text(text, chat_id, msg_id, parse_mode='Markdown', reply_markup=kb)
+                    else:
+                        m = bot.send_message(chat_id, text, parse_mode='Markdown', reply_markup=kb)
+                        info['sms_message_id'] = m.message_id
+                except telebot.apihelper.ApiTelegramException as e:
+                    if "message is not modified" not in str(e):
+                        raise
+                except Exception:
+                    pass
+            time.sleep(5)
+    threading.Thread(target=check_sms, daemon=True).start()
+
 @bot.callback_query_handler(lambda c: c.data.startswith('retry_'))
 def retry_sms(c):
     aid = c.data.split('_', 1)[1]
-    try:
-        requests.get(
-            SMSBOWER_URL,
-            params={'api_key':API_KEY_SMSBOWER,'action':'setStatus','status':'3','id':aid},
-            timeout=10
-        )
-    except:
-        pass
-    bot.answer_callback_query(c.id, '🔄 Novo SMS solicitado.', show_alert=True)
+    info = status_map.get(aid) or {}
+    provider = info.get('provider', 'smsbower')
+    if provider == 'smsbower':
+        try:
+            requests.get(
+                SMSBOWER_URL,
+                params={'api_key':API_KEY_SMSBOWER,'action':'setStatus','status':'3','id':aid},
+                timeout=10
+            )
+        except:
+            pass
+        bot.answer_callback_query(c.id, '🔄 Novo SMS solicitado.', show_alert=True)
+    else:
+        # sms24h: solicitar novo SMS (status=3)
+        set_status_sms24h(aid, 3)
+        bot.answer_callback_query(c.id, '🔄 Novo SMS solicitado.', show_alert=True)
     spawn_sms_thread(aid)
 
 @bot.callback_query_handler(lambda c: c.data.startswith('cancel_blocked_'))
@@ -833,7 +954,8 @@ def cancelar_user(c):
     if info.get('canceled_by_user'):
         return bot.answer_callback_query(c.id, '❌ Já cancelado.', True)
     info['canceled_by_user'] = True
-    cancelar_numero(aid)
+    provider = info.get('provider', 'smsbower')
+    cancelar_numero(aid, provider)
     ok = marcar_cancelado_e_devolver(info['user_id'], aid)
     if ok:
         try: bot.delete_message(info['chat_id'], info['message_id'])
@@ -884,7 +1006,6 @@ def painel_admin():
                         msg_feedback = f"Saldo de R$ {val:.2f} adicionado ao usuário {uid}."
             exportar_backup_json()
 
-    # Estatísticas
     with get_db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT count(*) FROM numeros_sms")
@@ -941,11 +1062,10 @@ def mp_webhook():
     if data.get('type') == 'payment':
         pid = data['data']['id']
         try:
-            # idempotência
             with get_db_conn() as conn, conn.cursor() as cur:
                 cur.execute("SELECT 1 FROM payments WHERE id=%s", (str(pid),))
                 if cur.fetchone():
-                    return '', 200  # já processado
+                    return '', 200
 
             resp = mp_client.payment().get(pid)['response']
             if resp.get('status') == 'approved':
@@ -955,7 +1075,6 @@ def mp_webhook():
                     uid = int(uid_str)
                     amt = float(amt_str)
 
-                    # registra payment primeiro
                     with get_db_conn() as conn, conn.cursor() as cur:
                         cur.execute("INSERT INTO payments (id, raw) VALUES (%s, %s) ON CONFLICT DO NOTHING",
                                     (str(pid), json.dumps(resp)))
@@ -1004,11 +1123,9 @@ SCANNER_MIN_COUNT = 50
 SCANNER_COUNTRY_ID = "14"  # Brazil na resposta do getPricesByService
 
 def scanner_loop():
-    # roda para sempre
     while True:
         try:
             best = None  # (min_price, service_id, activate_org_code, title, count)
-            total_checked = 0
             for sid in range(1, 1320):  # 1..1319
                 url = f"https://smsbower.org/activations/getPricesByService?serviceId={sid}&withPopular=true&rank=1"
                 try:
@@ -1016,7 +1133,6 @@ def scanner_loop():
                     r.raise_for_status()
                 except Exception:
                     continue
-                total_checked += 1
                 try:
                     payload = r.json()
                 except Exception:
@@ -1038,7 +1154,6 @@ def scanner_loop():
                 except:
                     continue
                 if count > SCANNER_MIN_COUNT and (SCANNER_MIN_PRICE <= mp <= SCANNER_MAX_PRICE):
-                    # olhar services.json para pegar title e activate_org_code
                     with services_index_lock:
                         si = services_index.get(str(sid))
                     if not si:
@@ -1047,19 +1162,16 @@ def scanner_loop():
                     else:
                         title = si.get("title") or f"serviceId {sid}"
                         aoc = si.get("activate_org_code")
-
-                    if aoc:  # só consideramos se tiver o código pra usar
+                    if aoc:
                         if (best is None) or (mp < best[0]):
                             best = (mp, sid, aoc, title, count)
 
             if best:
                 mp, sid, aoc, title, count = best
-                # agora também preserva o preço escolhido
                 set_china2_service_code(aoc, reason=f"(id:{sid}, {title}, count:{count}, min_price:{mp})", price=mp)
                 logger.info(f"[SCANNER] Melhor China2: serviceId={sid} title={title} aoc={aoc} count={count} min_price={mp}")
             else:
                 logger.info("[SCANNER] Nenhum candidato elegível encontrado para China2. Mantendo atual.")
-
         except Exception as e:
             logger.error(f"[SCANNER] erro geral: {e}")
 
@@ -1069,15 +1181,11 @@ def scanner_loop():
 # ======================== MAIN ===========================
 # =========================================================
 if __name__ == '__main__':
-    # inicia scanner em background
     threading.Thread(target=scanner_loop, daemon=True).start()
-
-    # telegram webhook
     try:
         bot.remove_webhook()
         if SITE_URL:
             bot.set_webhook(f"{SITE_URL}/webhook/telegram")
     except Exception as e:
         logger.error(f"Erro set_webhook: {e}")
-
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))

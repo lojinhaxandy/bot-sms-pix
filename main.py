@@ -99,7 +99,6 @@ class _PooledConn:
 
     def __exit__(self, exc_type, exc, tb):
         try:
-            # rollback automático se algo falhou e ficou transação aberta
             if exc_type is not None:
                 try:
                     self._conn.rollback()
@@ -212,7 +211,7 @@ SERVICE_CODE_LOCK = threading.Lock()
 GLOBAL_SERVICE_MAP = {
     'mercado': 'cq',
     'china':   'ev',
-    'china2':  'ki',   # será atualizado pelo scanner
+    'china2':  'hw',   # será atualizado pelo scanner
     'picpay':  'ev',
     'outros':  'ot'
 }
@@ -404,7 +403,6 @@ def solicitar_numero(servico, max_price=None):
         r = HTTP.get(SMSBOWER_URL, params=params, timeout=15)
         r.raise_for_status()
         text = r.text.strip()
-        # só loga sucesso/erros; evita flood
         if text.startswith("ACCESS_NUMBER:"):
             logging.info(f"GET_NUMBER OK")
         else:
@@ -1027,7 +1025,6 @@ def scanner_loop():
                     continue
 
                 services = payload.get("services") or {}
-                # alguns retornos podem não indexar pelo sid; pega o primeiro
                 svc = services.get(str(sid)) or (next(iter(services.values())) if services else None)
                 if not svc:
                     time.sleep(0.03)
@@ -1070,7 +1067,7 @@ def scanner_loop():
         time.sleep(SCANNER_INTERVAL_SEC)
 
 # =========================================================
-# ============== STARTUP ÚNICO (Railway/Gunicorn) =========
+# ============== STARTUP DO SCANNER (sem decorator) =======
 # =========================================================
 _scanner_started = False
 def start_background_once():
@@ -1080,15 +1077,13 @@ def start_background_once():
     _scanner_started = True
     threading.Thread(target=scanner_loop, daemon=True).start()
 
-@app.before_first_request
-def _kickoff():
-    start_background_once()
+# Inicia o scanner já no import (funciona com gunicorn/railway mesmo sem before_first_request)
+start_background_once()
 
 # =========================================================
 # ======================== MAIN ===========================
 # =========================================================
 if __name__ == '__main__':
-    start_background_once()
     try:
         bot.remove_webhook()
         if SITE_URL:

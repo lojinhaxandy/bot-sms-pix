@@ -533,7 +533,7 @@ def show_comprar_menu(chat_id):
         telebot.types.InlineKeyboardButton('💸 PicPay SMS       - R$0.65', callback_data='comprar_picpay'),
         telebot.types.InlineKeyboardButton('📡 Outros SMS        - R$1.10', callback_data='comprar_outros'),
         # >>> NOVO botão
-        telebot.types.InlineKeyboardButton('🛰️ SMS Servidor 2    - R$0.77', callback_data='comprar_srv2')
+        telebot.types.InlineKeyboardButton('🛰️ Outros SMS Servidor 2    - R$0.77', callback_data='comprar_srv2')
     )
     bot.send_message(chat_id, 'Escolha serviço:', reply_markup=kb)
 
@@ -657,7 +657,7 @@ def cb_comprar(c):
         'china2':'SMS para China 2',
         'picpay':'PicPay SMS',
         'outros':'Outros SMS',
-        'srv2':'SMS Servidor 2'
+        'srv2':'Outros SMS Servidor 2'
     }
     idsms  = {
         'mercado': get_service_code('mercado'),

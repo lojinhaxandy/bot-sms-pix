@@ -212,7 +212,7 @@ SERVICE_CODE_LOCK = threading.Lock()
 GLOBAL_SERVICE_MAP = {
     'mercado': 'cq',
     'china':   'ev',
-    'china2':  'hw',   # será atualizado pelo scanner
+    'china2':  'ki',   # será atualizado pelo scanner
     'picpay':  'ev',
     'outros':  'ot'
 }

@@ -13,33 +13,55 @@ from flask import Flask, request, render_template_string
 import telebot
 import mercadopago
 
-# === CONFIG ===
+# =========================================================
+# ======================= CONFIG ==========================
+# =========================================================
 BOT_TOKEN         = os.getenv("BOT_TOKEN")
 ALERT_BOT_TOKEN   = os.getenv("ALERT_BOT_TOKEN")
 ALERT_CHAT_ID     = os.getenv("ALERT_CHAT_ID")
 API_KEY_SMSBOWER  = os.getenv("API_KEY_SMSBOWER")
 SMSBOWER_URL      = "https://smsbower.online/stubs/handler_api.php"
-COUNTRY_ID        = "73"
+COUNTRY_ID        = "73"  # BRAZIL no provider SMSBOWER
 MP_ACCESS_TOKEN   = os.getenv("MP_ACCESS_TOKEN")
-SITE_URL          = os.getenv("SITE_URL").rstrip('/')
+SITE_URL          = (os.getenv("SITE_URL") or "").rstrip('/')
 BACKUP_BOT_TOKEN  = os.getenv("BACKUP_BOT_TOKEN") or '7982928818:AAEPf9AgnSEqEL7Ay5UaMPyG27h59PdGUYs'
 BACKUP_CHAT_ID    = os.getenv("BACKUP_CHAT_ID") or '6829680279'
 ADMIN_BOT_TOKEN   = os.getenv("ADMIN_BOT_TOKEN") or '8011035929:AAHpztTqqAXaQ-2cQb23qklZIX4k0vVM2Uk'
 ADMIN_CHAT_ID     = os.getenv("ADMIN_CHAT_ID") or '6829680279'
 DATABASE_URL      = os.getenv("DATABASE_URL")
 PAINEL_TOKEN      = os.getenv("PAINEL_TOKEN") or "painel2024"
+SERVICES_JSON     = os.getenv("SERVICES_JSON") or "services.json"  # caminho do JSON que você já tem
 
+# =========================================================
+# =========== BOTS / SDK / FLASK (mantidos) ===============
+# =========================================================
 bot         = telebot.TeleBot(BOT_TOKEN, threaded=True)
-alert_bot   = telebot.TeleBot(ALERT_BOT_TOKEN)
+alert_bot   = telebot.TeleBot(ALERT_BOT_TOKEN) if ALERT_BOT_TOKEN else None
 backup_bot  = telebot.TeleBot(BACKUP_BOT_TOKEN)
 admin_bot   = telebot.TeleBot(ADMIN_BOT_TOKEN)
 mp_client   = mercadopago.SDK(MP_ACCESS_TOKEN)
 app = Flask(__name__)
 
+# =========================================================
+# ==================== BANCO DE DADOS =====================
+# =========================================================
 def get_db_conn():
     return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
 
-# Cria tabela de números_sms se não existir
+def criar_tabela_usuarios():
+    # cria se não existir (evita erro em instalações novas)
+    with get_db_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS usuarios (
+                id TEXT PRIMARY KEY,
+                saldo DOUBLE PRECISION DEFAULT 0,
+                numeros TEXT NOT NULL,
+                refer TEXT,
+                indicados TEXT
+            )
+        """)
+        conn.commit()
+
 def criar_tabela_numeros_sms():
     with get_db_conn() as conn:
         with conn.cursor() as cur:
@@ -54,30 +76,31 @@ def criar_tabela_numeros_sms():
                 )
             """)
             conn.commit()
+
+def criar_tabela_payments():
+    # guarda payments processados pra não creditar duas vezes (idempotência)
+    with get_db_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS payments (
+                id TEXT PRIMARY KEY,
+                raw JSONB,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        conn.commit()
+
+# cria tabelas
+criar_tabela_usuarios()
 criar_tabela_numeros_sms()
+criar_tabela_payments()
 
-# --------- Funções robustas para envio -----------
-def enviar_mensagem_bot(bot_instance, chat_id, texto, tentativas=3):
-    for _ in range(tentativas):
-        try:
-            bot_instance.send_message(chat_id, texto)
-            return True
-        except Exception:
-            time.sleep(1)
-    return False
-
-def enviar_documento_bot(bot_instance, chat_id, file_path, tentativas=3):
-    for _ in range(tentativas):
-        try:
-            with open(file_path, "rb") as bf:
-                bot_instance.send_document(chat_id, bf)
-            return True
-        except Exception:
-            time.sleep(1)
-    return False
-
+# =========================================================
+# =================== LOG EM TELEGRAM =====================
+# =========================================================
 class TelegramLogHandler(logging.Handler):
     def emit(self, record):
+        if not alert_bot or not ALERT_CHAT_ID:
+            return
         msg = self.format(record)
         try:
             alert_bot.send_message(ALERT_CHAT_ID, msg)
@@ -90,6 +113,78 @@ handler = TelegramLogHandler()
 handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
 logger.addHandler(handler)
 
+# =========================================================
+# ======= SERVICES JSON + MAPA DE SERVIÇOS DINÂMICO =======
+# =========================================================
+services_index_lock = threading.Lock()
+services_index = {}  # { "service_id_str": {"title":..., "activate_org_code":...} }
+
+def load_services_index(path=SERVICES_JSON):
+    global services_index
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        index = {}
+        # arquivo vem como { "1": {...}, "2": {...}, ... }
+        for sid, payload in data.items():
+            index[str(sid)] = {
+                "title": payload.get("title"),
+                "activate_org_code": payload.get("activate_org_code"),
+            }
+        with services_index_lock:
+            services_index = index
+        logger.info(f"[SERVICES] Carregado {len(index)} serviços do {path}")
+    except Exception as e:
+        logger.error(f"[SERVICES] Erro ao carregar {path}: {e}")
+
+load_services_index()
+
+# Mapa original usado no teu callback (agora com chave dinâmica para china2)
+SERVICE_CODE_LOCK = threading.Lock()
+GLOBAL_SERVICE_MAP = {
+    'mercado': 'cq',
+    'china':   'ev',
+    'china2':  'ki',   # será atualizado pelo scanner
+    'picpay':  'ev',
+    'outros':  'ot'
+}
+
+def get_service_code(key):
+    with SERVICE_CODE_LOCK:
+        return GLOBAL_SERVICE_MAP.get(key)
+
+# preço atual escolhido pelo scanner para china2
+SCANNER_LAST_PRICE = None
+SCANNER_PRICE_LOCK = threading.Lock()
+
+def set_china2_service_code(new_code, reason="", price=None):
+    with SERVICE_CODE_LOCK:
+        old = GLOBAL_SERVICE_MAP['china2']
+        GLOBAL_SERVICE_MAP['china2'] = new_code
+    # guarda o preço escolhido pelo scanner (se vier)
+    if price is not None:
+        try:
+            p = float(price)
+        except:
+            p = None
+        if p is not None:
+            with SCANNER_PRICE_LOCK:
+                global SCANNER_LAST_PRICE
+                SCANNER_LAST_PRICE = p
+    logger.info(f"[SCANNER] China2: {old} → {new_code} {('['+reason+']') if reason else ''}")
+    try:
+        if admin_bot and ADMIN_CHAT_ID:
+            admin_bot.send_message(
+                ADMIN_CHAT_ID,
+                f"🔄 China 2 atualizado: `{old}` → `{new_code}` {reason}".strip(),
+                parse_mode='Markdown'
+            )
+    except:
+        pass
+
+# =========================================================
+# ================== VARS / LOCKS EXISTENTES ==============
+# =========================================================
 data_lock        = threading.Lock()
 status_lock      = threading.Lock()
 status_map       = {}
@@ -97,7 +192,9 @@ PENDING_RECHARGE = {}
 PRAZO_MINUTOS    = 23
 PRAZO_SEGUNDOS   = PRAZO_MINUTOS * 60
 
-# ==================== USUÁRIO (CRUD) =====================
+# =========================================================
+# ======================== USUÁRIO =========================
+# =========================================================
 def carregar_usuario(uid):
     with get_db_conn() as conn:
         with conn.cursor() as cur:
@@ -106,7 +203,7 @@ def carregar_usuario(uid):
             if not user:
                 return None
             user['numeros'] = json.loads(user['numeros'])
-            user['indicados'] = json.loads(user.get('indicados', '[]'))
+            user['indicados'] = json.loads(user.get('indicados', '[]') or '[]')
             return user
 
 def salvar_usuario(user):
@@ -131,7 +228,8 @@ def criar_usuario(uid, refer=None):
     with get_db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT id FROM usuarios WHERE id=%s", (str(uid),))
-            if cur.fetchone():
+            exists = cur.fetchone()
+            if exists:
                 return
             cur.execute("""
                 INSERT INTO usuarios (id, saldo, numeros, refer, indicados)
@@ -160,12 +258,14 @@ def exportar_backup_json():
             users = cur.fetchall()
             for u in users:
                 u['numeros'] = json.loads(u['numeros'])
-                u['indicados'] = json.loads(u.get('indicados', '[]'))
-            with open("usuarios_backup.json", "w") as f:
+                u['indicados'] = json.loads(u.get('indicados', '[]') or '[]')
+            with open("usuarios_backup.json", "w", encoding="utf-8") as f:
                 json.dump(users, f, indent=2, ensure_ascii=False)
             enviar_documento_bot(backup_bot, BACKUP_CHAT_ID, "usuarios_backup.json")
 
-# ==================== OPERAÇÕES DE SALDO / NÚMEROS =====================
+# =========================================================
+# ============= SALDO / NÚMEROS (mantido) =================
+# =========================================================
 def comprar_numero_atomico(uid, aid, price):
     with get_db_conn() as conn:
         with conn.cursor() as cur:
@@ -191,8 +291,7 @@ def comprar_numero_atomico(uid, aid, price):
             """, (aid, str(uid), price))
             conn.commit()
     exportar_backup_json()
-    logger.info(f"Saldo de {uid} = R$ {saldo:.2f}")
-    logger.info(f"Número {aid} adicionado a {uid}")
+    logger.info(f"Saldo de {uid} atualizado. Nº {aid} associado.")
     return True
 
 def marcar_cancelado_e_devolver(uid, aid):
@@ -215,7 +314,28 @@ def registrar_sms_recebido(aid):
             cur.execute("UPDATE numeros_sms SET sms_recebido=TRUE WHERE aid=%s", (aid,))
             conn.commit()
 
-# ==================== SMSBOWER =====================
+# =========================================================
+# ================== SMSBOWER (mantido) ===================
+# =========================================================
+def enviar_mensagem_bot(bot_instance, chat_id, texto, tentativas=3):
+    for _ in range(tentativas):
+        try:
+            bot_instance.send_message(chat_id, texto)
+            return True
+        except Exception:
+            time.sleep(1)
+    return False
+
+def enviar_documento_bot(bot_instance, chat_id, file_path, tentativas=3):
+    for _ in range(tentativas):
+        try:
+            with open(file_path, "rb") as bf:
+                bot_instance.send_document(chat_id, bf)
+            return True
+        except Exception:
+            time.sleep(1)
+    return False
+
 def solicitar_numero(servico, max_price=None):
     params = {
         'api_key': API_KEY_SMSBOWER,
@@ -223,9 +343,8 @@ def solicitar_numero(servico, max_price=None):
         'service': servico,
         'country': COUNTRY_ID
     }
-    # Envia maxPrice em USD (3 casas decimais para suportar 0.001)
     if max_price is not None:
-        params['maxPrice'] = f"{max_price:.3f}"
+        params['maxPrice'] = f"{max_price:.4f}"  # 4 casas pra garantir
     try:
         r = requests.get(SMSBOWER_URL, params=params, timeout=15)
         r.raise_for_status()
@@ -345,7 +464,60 @@ def spawn_sms_thread(aid):
             time.sleep(5)
     threading.Thread(target=check_sms, daemon=True).start()
 
-# ===================== MENUS E HANDLERS TELEGRAM =====================
+# ========= NOVO: pegar menor preço via getPricesV2 =======
+def obter_menor_preco_v2(service_code, country_id):
+    """
+    Chama action=getPricesV2 e retorna o menor preço disponível (float)
+    para o service_code/country_id. Retorna None se não houver.
+    Exemplo de resposta:
+      {"73":{"ev":{"0.0683":18,"0.5011":469021}}}
+    """
+    try:
+        r = requests.get(
+            SMSBOWER_URL,
+            params={
+                'api_key': API_KEY_SMSBOWER,
+                'action': 'getPricesV2',
+                'service': service_code,
+                'country': country_id
+            },
+            timeout=12
+        )
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        logger.error(f"[getPricesV2] erro: {e}")
+        return None
+
+    country_map = data.get(str(country_id)) or data.get(country_id) or {}
+    svc_map = country_map.get(service_code) or {}
+    if not isinstance(svc_map, dict) or not svc_map:
+        return None
+
+    # filtra buckets com quantidade > 0 e ordena pelo preço (chave)
+    candidatos = []
+    for price_str, qty in svc_map.items():
+        try:
+            p = float(str(price_str).replace(',', '.'))
+        except:
+            continue
+        try:
+            q = int(qty)
+        except:
+            q = 0
+        if q > 0:
+            candidatos.append(p)
+
+    if not candidatos:
+        return None
+
+    candidatos.sort()
+    menor = candidatos[0]
+    return menor
+
+# =========================================================
+# ====================== MENUS (iguais) ===================
+# =========================================================
 def send_menu(chat_id):
     kb = telebot.types.InlineKeyboardMarkup(row_width=1)
     kb.add(
@@ -383,7 +555,7 @@ def show_comprar_menu(chat_id):
         telebot.types.InlineKeyboardButton('🇨🇳 SMS para China   - R$0.60', callback_data='comprar_china'),
         telebot.types.InlineKeyboardButton('🇨🇳 SMS para China 2 - R$0.60', callback_data='comprar_china2'),
         telebot.types.InlineKeyboardButton('💸 PicPay SMS       - R$0.65', callback_data='comprar_picpay'),
-        telebot.types.InlineKeyboardButton('📡 Outros SMS        - R$1.10', callback_data='comprar_outros')  # atualizado 0.9 -> 1.1
+        telebot.types.InlineKeyboardButton('📡 Outros SMS        - R$1.10', callback_data='comprar_outros')
     )
     bot.send_message(chat_id, 'Escolha serviço:', reply_markup=kb)
 
@@ -417,7 +589,7 @@ def menu_recarregar(c):
         'Digite o valor (em reais) que deseja recarregar:'
     )
 
-@bot.message_handler(func=lambda m: PENDING_RECHARGE.get(m.from_user.id) and re.fullmatch(r"\d+(\.\d{1,2})?", m.text))
+@bot.message_handler(func=lambda m: PENDING_RECHARGE.get(m.from_user.id) and re.fullmatch(r"\d+(\.\d{1,2})?", m.text or ""))
 def handle_recharge_amount(m):
     uid = m.from_user.id
     amount = float(m.text)
@@ -493,17 +665,19 @@ def menu_refer(c):
     bot.send_message(c.message.chat.id, text, parse_mode='Markdown')
     send_menu(c.message.chat.id)
 
+# =========================================================
+# ================ COMPRAR (com getPricesV2) ==============
+# =========================================================
 @bot.callback_query_handler(lambda c: c.data.startswith('comprar_'))
 def cb_comprar(c):
     user_id, key = c.from_user.id, c.data.split('_')[1]
     criar_usuario(user_id)
-    # preços do usuário (mantidos, exceto 'outros' alterado para 1.10; novo china2 = 0.60)
     prices = {
         'mercado':0.75,
         'china':0.60,
         'china2':0.60,
         'picpay':0.65,
-        'outros':1.10  # alterado 0.9 -> 1.1
+        'outros':1.10
     }
     names  = {
         'mercado':'Mercado Pago SMS',
@@ -513,41 +687,44 @@ def cb_comprar(c):
         'outros':'Outros SMS'
     }
     idsms  = {
-        'mercado':'cq',
-        'china':'ev',
-        'china2':'ki',  # novo serviço
-        'picpay':'ev',
-        'outros':'ot'
+        'mercado': get_service_code('mercado'),
+        'china':   get_service_code('china'),
+        'china2':  get_service_code('china2'),
+        'picpay':  get_service_code('picpay'),
+        'outros':  get_service_code('outros')
     }
     balance = carregar_usuario(user_id)['saldo']
     price, service = prices[key], names[key]
     if balance < price:
         return bot.answer_callback_query(c.id, '❌ Saldo insuficiente.', True)
     try:
-        bot.edit_message_text(
-            '⏳ Solicitando número...',
-            c.message.chat.id,
-            c.message.message_id
-        )
+        bot.edit_message_text('⏳ Solicitando número...', c.message.chat.id, c.message.message_id)
     except telebot.apihelper.ApiTelegramException as e:
         if "message is not modified" not in str(e): raise
-    except Exception: pass
+    except Exception:
+        pass
 
-    # ===== Tentativas de menor preço para maior (em USD) =====
-    attempt_prices = []
+    # ====== NOVO: determinar max_price ======
+    max_price = None
     if key == 'china2':
-        # 0.001 .. 0.100 (passo 0.001)
-        attempt_prices = [round(i/1000, 3) for i in range(1, 100+1)]
-    elif key in ('mercado', 'picpay', 'china'):
-        attempt_prices = [round(i/100, 2) for i in range(1, 10+1)]  # 0.01 .. 0.10
-    else:  # 'outros'
-        attempt_prices = [round(i/100, 2) for i in range(1, 19+1)]  # 0.01 .. 0.19
+        # usa SEMPRE o preço que o scanner definiu, se houver
+        with SCANNER_PRICE_LOCK:
+            mp = SCANNER_LAST_PRICE
+        if mp is not None:
+            max_price = float(mp)
+        else:
+            # fallback: pega menor preço disponível via V2
+            max_price = obter_menor_preco_v2(idsms[key], COUNTRY_ID)
+    else:
+        # outros serviços: sempre via V2
+        max_price = obter_menor_preco_v2(idsms[key], COUNTRY_ID)
 
-    resp = {}
-    for mp in attempt_prices:
-        resp = solicitar_numero(idsms[key], max_price=mp)
-        if resp.get('status') == 'success':
-            break
+    # regra: se não tiver preço elegível ou for > 0.1, não compra
+    if (max_price is None) or (float(max_price) > 0.1):
+        return bot.send_message(c.message.chat.id, '🚫 Sem números disponíveis no preço permitido.')
+
+    # ===== tentar comprar com o menor preço =====
+    resp = solicitar_numero(idsms[key], max_price=float(max_price))
     if resp.get('status') != 'success':
         return bot.send_message(c.message.chat.id, '🚫 Sem números disponíveis.')
 
@@ -561,9 +738,7 @@ def cb_comprar(c):
 
     kb_blocked = telebot.types.InlineKeyboardMarkup()
     kb_blocked.row(
-        telebot.types.InlineKeyboardButton(
-            f'❌ Cancelar (2m)', callback_data=f'cancel_blocked_{aid}'
-        )
+        telebot.types.InlineKeyboardButton(f'❌ Cancelar (2m)', callback_data=f'cancel_blocked_{aid}')
     )
     kb_blocked.row(
         telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
@@ -584,12 +759,7 @@ def cb_comprar(c):
         f"🕘 Prazo: {PRAZO_MINUTOS} minutos\n\n"
         f"💡 Ativo por {PRAZO_MINUTOS} minutos; sem SMS, saldo devolvido automaticamente."
     )
-    msg = bot.send_message(
-        c.message.chat.id,
-        text,
-        parse_mode='Markdown',
-        reply_markup=kb_blocked
-    )
+    msg = bot.send_message(c.message.chat.id, text, parse_mode='Markdown', reply_markup=kb_blocked)
     status_map[aid] = {
         'user_id':    user_id,
         'price':      price,
@@ -600,6 +770,7 @@ def cb_comprar(c):
         'short':      short
     }
     spawn_sms_thread(aid)
+
     def countdown():
         for minute in range(PRAZO_MINUTOS):
             time.sleep(60)
@@ -615,25 +786,23 @@ def cb_comprar(c):
             )
             kb_sel = kb_blocked if minute < 2 else kb_unlocked
             try:
-                bot.edit_message_text(
-                    new_text,
-                    info['chat_id'],
-                    info['message_id'],
-                    parse_mode='Markdown',
-                    reply_markup=kb_sel
-                )
+                bot.edit_message_text(new_text, info['chat_id'], info['message_id'], parse_mode='Markdown', reply_markup=kb_sel)
             except telebot.apihelper.ApiTelegramException as e:
-                if "message is not modified" not in str(e): raise
-            except Exception: pass
+                if "message is not modified" not in str(e):
+                    raise
+            except Exception:
+                pass
+
     def auto_cancel():
         time.sleep(PRAZO_SEGUNDOS)
         info = status_map.get(aid)
         if info and not info.get('codes') and not info.get('canceled_by_user'):
             cancelar_numero(aid)
-            ok = marcar_cancelado_e_devolver(info['user_id'], aid)
-            if ok:
+            ok2 = marcar_cancelado_e_devolver(info['user_id'], aid)
+            if ok2:
                 try: bot.delete_message(info['chat_id'], info['message_id'])
                 except: pass
+
     threading.Thread(target=countdown, daemon=True).start()
     threading.Thread(target=auto_cancel, daemon=True).start()
 
@@ -646,7 +815,8 @@ def retry_sms(c):
             params={'api_key':API_KEY_SMSBOWER,'action':'setStatus','status':'3','id':aid},
             timeout=10
         )
-    except: pass
+    except:
+        pass
     bot.answer_callback_query(c.id, '🔄 Novo SMS solicitado.', show_alert=True)
     spawn_sms_thread(aid)
 
@@ -672,7 +842,9 @@ def cancelar_user(c):
     else:
         bot.answer_callback_query(c.id, '❌ Já cancelado anteriormente.', show_alert=True)
 
-# =============== PAINEL ADMIN WEB ===============
+# =========================================================
+# ================== PAINEL ADMIN (igual) =================
+# =========================================================
 @app.route('/admin', methods=['GET', 'POST'])
 def painel_admin():
     token = request.args.get('token', '')
@@ -749,7 +921,9 @@ def painel_admin():
         </ul>
     """, msg_feedback=msg_feedback, total=total, cancelados=cancelados, recebidos=recebidos)
 
-# =============== FLASK BOT / WEBHOOK ===============
+# =========================================================
+# =================== HEALTH / WEBHOOKS ===================
+# =========================================================
 @app.route('/', methods=['GET'])
 def health():
     return 'OK', 200
@@ -763,39 +937,52 @@ def telegram_webhook():
 
 @app.route('/webhook/mercadopago', methods=['POST'])
 def mp_webhook():
-    data = request.get_json()
+    data = request.get_json() or {}
     if data.get('type') == 'payment':
         pid = data['data']['id']
-        resp = mp_client.payment().get(pid)['response']
-        if resp.get('status') == 'approved':
-            ext = resp.get('external_reference', '')
-            if ':' in ext:
-                uid_str, amt_str = ext.split(':', 1)
-                try:
+        try:
+            # idempotência
+            with get_db_conn() as conn, conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM payments WHERE id=%s", (str(pid),))
+                if cur.fetchone():
+                    return '', 200  # já processado
+
+            resp = mp_client.payment().get(pid)['response']
+            if resp.get('status') == 'approved':
+                ext = resp.get('external_reference', '')
+                if ':' in ext:
+                    uid_str, amt_str = ext.split(':', 1)
                     uid = int(uid_str)
                     amt = float(amt_str)
+
+                    # registra payment primeiro
+                    with get_db_conn() as conn, conn.cursor() as cur:
+                        cur.execute("INSERT INTO payments (id, raw) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                                    (str(pid), json.dumps(resp)))
+                        conn.commit()
+
                     user = carregar_usuario(uid)
                     if user:
                         current = user.get('saldo', 0.0)
                         refid = user.get("refer")
-                        bonus = 0
+                        bonus = 0.0
                         ref_text = ""
                         if refid:
                             ref_user = carregar_usuario(refid)
                             if ref_user:
                                 bonus = round(amt * 0.10, 2)
-                                with get_db_conn() as conn:
-                                    with conn.cursor() as cur:
-                                        cur.execute("UPDATE usuarios SET saldo=saldo+%s WHERE id=%s", (bonus, str(refid)))
-                                        conn.commit()
+                                with get_db_conn() as conn, conn.cursor() as cur:
+                                    cur.execute("UPDATE usuarios SET saldo=saldo+%s WHERE id=%s", (bonus, str(refid)))
+                                    conn.commit()
                                 try:
                                     bot.send_message(int(refid), f"🎉 Você ganhou R$ {bonus:.2f} de bônus pois seu indicado recarregou saldo!")
-                                except: pass
+                                except:
+                                    pass
                                 ref_text = f"\nIndicado por: {refid}\nBônus enviado: R$ {bonus:.2f}"
-                        with get_db_conn() as conn:
-                            with conn.cursor() as cur:
-                                cur.execute("UPDATE usuarios SET saldo=saldo+%s WHERE id=%s", (amt, str(uid)))
-                                conn.commit()
+
+                        with get_db_conn() as conn, conn.cursor() as cur:
+                            cur.execute("UPDATE usuarios SET saldo=saldo+%s WHERE id=%s", (amt, str(uid)))
+                            conn.commit()
                         exportar_backup_json()
                         bot.send_message(uid, f"✅ Recarga de R$ {amt:.2f} confirmada! Seu novo saldo é R$ {current + amt:.2f}")
                         enviar_mensagem_bot(
@@ -803,11 +990,94 @@ def mp_webhook():
                             ADMIN_CHAT_ID,
                             f"💰 Novo DEPÓSITO\nUser: {uid}\nValor: R$ {amt:.2f}\nData: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}{ref_text}"
                         )
-                except Exception as e:
-                    logger.error(f"Erro external_reference: {e}")
+        except Exception as e:
+            logger.error(f"[MP] Erro webhook: {e}")
     return '', 200
 
+# =========================================================
+# ================= SCANNER 20m (China 2) =================
+# =========================================================
+SCANNER_INTERVAL_SEC = 20 * 60  # 20 minutos
+SCANNER_MIN_PRICE = 0.001
+SCANNER_MAX_PRICE = 0.100
+SCANNER_MIN_COUNT = 50
+SCANNER_COUNTRY_ID = "14"  # Brazil na resposta do getPricesByService
+
+def scanner_loop():
+    # roda para sempre
+    while True:
+        try:
+            best = None  # (min_price, service_id, activate_org_code, title, count)
+            total_checked = 0
+            for sid in range(1, 1320):  # 1..1319
+                url = f"https://smsbower.org/activations/getPricesByService?serviceId={sid}&withPopular=true&rank=1"
+                try:
+                    r = requests.get(url, timeout=15)
+                    r.raise_for_status()
+                except Exception:
+                    continue
+                total_checked += 1
+                try:
+                    payload = r.json()
+                except Exception:
+                    continue
+                services = payload.get("services") or {}
+                svc = services.get(str(sid))
+                if not svc:
+                    continue
+                countries = (svc.get("countries") or {})
+                br = countries.get(SCANNER_COUNTRY_ID)  # "14"
+                if not br:
+                    continue
+                min_price = br.get("min_price")
+                count = br.get("count", 0)
+                if min_price is None:
+                    continue
+                try:
+                    mp = float(min_price)
+                except:
+                    continue
+                if count > SCANNER_MIN_COUNT and (SCANNER_MIN_PRICE <= mp <= SCANNER_MAX_PRICE):
+                    # olhar services.json para pegar title e activate_org_code
+                    with services_index_lock:
+                        si = services_index.get(str(sid))
+                    if not si:
+                        title = f"serviceId {sid}"
+                        aoc = None
+                    else:
+                        title = si.get("title") or f"serviceId {sid}"
+                        aoc = si.get("activate_org_code")
+
+                    if aoc:  # só consideramos se tiver o código pra usar
+                        if (best is None) or (mp < best[0]):
+                            best = (mp, sid, aoc, title, count)
+
+            if best:
+                mp, sid, aoc, title, count = best
+                # agora também preserva o preço escolhido
+                set_china2_service_code(aoc, reason=f"(id:{sid}, {title}, count:{count}, min_price:{mp})", price=mp)
+                logger.info(f"[SCANNER] Melhor China2: serviceId={sid} title={title} aoc={aoc} count={count} min_price={mp}")
+            else:
+                logger.info("[SCANNER] Nenhum candidato elegível encontrado para China2. Mantendo atual.")
+
+        except Exception as e:
+            logger.error(f"[SCANNER] erro geral: {e}")
+
+        time.sleep(SCANNER_INTERVAL_SEC)
+
+# =========================================================
+# ======================== MAIN ===========================
+# =========================================================
 if __name__ == '__main__':
-    bot.remove_webhook()
-    bot.set_webhook(f"{SITE_URL}/webhook/telegram")
+    # inicia scanner em background
+    threading.Thread(target=scanner_loop, daemon=True).start()
+
+    # telegram webhook
+    try:
+        bot.remove_webhook()
+        if SITE_URL:
+            bot.set_webhook(f"{SITE_URL}/webhook/telegram")
+    except Exception as e:
+        logger.error(f"Erro set_webhook: {e}")
+
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))

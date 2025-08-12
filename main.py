@@ -299,7 +299,8 @@ def marcar_cancelado_e_devolver(uid, aid):
             if not row or row['cancelado']:
                 return False
             price = row['price']
-            cur.execute("UPDATE numeros_sms SET cancelado=TRUE WHERE id=%s", (aid,))
+            # FIX: coluna correta é aid
+            cur.execute("UPDATE numeros_sms SET cancelado=TRUE WHERE aid=%s", (aid,))
             cur.execute("UPDATE usuarios SET saldo=saldo+%s WHERE id=%s", (price, str(uid)))
             conn.commit()
     exportar_backup_json()
@@ -308,7 +309,8 @@ def marcar_cancelado_e_devolver(uid, aid):
 def registrar_sms_recebido(aid):
     with get_db_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("UPDATE numeros_sms SET sms_recebido=TRUE WHERE id=%s", (aid,))
+            # FIX: coluna correta é aid
+            cur.execute("UPDATE numeros_sms SET sms_recebido=TRUE WHERE aid=%s", (aid,))
             conn.commit()
 
 # =========================================================
@@ -747,7 +749,6 @@ def cb_comprar(c):
             time.sleep(PRAZO_SEGUNDOS)
             info = status_map.get(aid)
             if info and not info.get('codes') and not info.get('canceled_by_user'):
-                # sms24h: cancelar via setStatus=8 antes de reembolsar
                 cancelar_numero(aid, provider='sms24h')
                 ok2 = marcar_cancelado_e_devolver(info['user_id'], aid)
                 if ok2:
@@ -887,9 +888,18 @@ def spawn_sms_thread(aid):
                     if ok:
                         bot.send_message(chat_id, f"❌ Cancelado pelo provider. R${info['price']:.2f} devolvido.")
                 return
-            code = status.split(':', 1)[1] if ':' in status else status
-            if code not in info['codes']:
-                info['codes'].append(code)
+
+            # pega payload após o primeiro ':', senão a string inteira
+            payload = status.split(':', 1)[1] if ':' in status else status
+
+            # sms24h: mostrar mensagem COMPLETA (ex.: "456BET?seu codigo ...")
+            if provider == 'sms24h' and status.startswith('STATUS_OK:'):
+                display = payload
+            else:
+                display = payload
+
+            if display not in info['codes']:
+                info['codes'].append(display)
                 registrar_sms_recebido(aid)
                 rt = datetime.now().strftime('%d/%m/%Y %H:%M:%S')
                 text = (

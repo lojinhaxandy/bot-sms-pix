@@ -7,8 +7,10 @@ import requests
 import re
 import psycopg2
 import psycopg2.extras
+from psycopg2.pool import SimpleConnectionPool
 from datetime import datetime
 from flask import Flask, request, render_template_string
+from requests.adapters import HTTPAdapter, Retry
 
 import telebot
 import mercadopago
@@ -33,59 +35,130 @@ PAINEL_TOKEN      = os.getenv("PAINEL_TOKEN") or "painel2024"
 SERVICES_JSON     = os.getenv("SERVICES_JSON") or "services.json"  # caminho do JSON que você já tem
 
 # =========================================================
+# ======= HTTP SESSION COM POOL + RETRIES =================
+# =========================================================
+HTTP = requests.Session()
+HTTP.mount(
+    "https://",
+    HTTPAdapter(
+        max_retries=Retry(
+            total=3,
+            connect=2,
+            read=2,
+            backoff_factor=0.5,
+            status_forcelist=(429, 500, 502, 503, 504),
+            raise_on_status=False,
+        ),
+        pool_connections=50,
+        pool_maxsize=50,
+    ),
+)
+HTTP.mount(
+    "http://",
+    HTTPAdapter(
+        max_retries=Retry(
+            total=3,
+            connect=2,
+            read=2,
+            backoff_factor=0.5,
+            status_forcelist=(429, 500, 502, 503, 504),
+            raise_on_status=False,
+        ),
+        pool_connections=50,
+        pool_maxsize=50,
+    ),
+)
+
+# =========================================================
 # =========== BOTS / SDK / FLASK (mantidos) ===============
 # =========================================================
 bot         = telebot.TeleBot(BOT_TOKEN, threaded=True)
 alert_bot   = telebot.TeleBot(ALERT_BOT_TOKEN) if ALERT_BOT_TOKEN else None
 backup_bot  = telebot.TeleBot(BACKUP_BOT_TOKEN)
-admin_bot   = telebot.TeleBot(ADMIN_BOT_TOKEN) if ADMIN_BOT_TOKEN else None
+admin_bot   = telebot.TeleBot(ADMIN_BOT_TOKEN)
 mp_client   = mercadopago.SDK(MP_ACCESS_TOKEN)
 app = Flask(__name__)
 
 # =========================================================
 # ==================== BANCO DE DADOS =====================
 # =========================================================
+DB_POOL = SimpleConnectionPool(
+    minconn=1,
+    maxconn=int(os.getenv("DB_MAXCONN", "8")),
+    dsn=DATABASE_URL
+)
+
+class _PooledConn:
+    """Wrapper para manter o padrão 'with get_db_conn() as conn:' e devolver ao pool."""
+    def __init__(self, pool):
+        self._pool = pool
+        self._conn = pool.getconn()
+
+    def __enter__(self):
+        return self._conn
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            # rollback automático se algo falhou e ficou transação aberta
+            if exc_type is not None:
+                try:
+                    self._conn.rollback()
+                except:
+                    pass
+        finally:
+            try:
+                self._pool.putconn(self._conn)
+            except:
+                try:
+                    self._conn.close()
+                except:
+                    pass
+
 def get_db_conn():
-    return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+    return _PooledConn(DB_POOL)
 
 def criar_tabela_usuarios():
-    with get_db_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS usuarios (
-                id TEXT PRIMARY KEY,
-                saldo DOUBLE PRECISION DEFAULT 0,
-                numeros TEXT NOT NULL,
-                refer TEXT,
-                indicados TEXT
-            )
-        """)
-        conn.commit()
+    with get_db_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS usuarios (
+                    id TEXT PRIMARY KEY,
+                    saldo DOUBLE PRECISION DEFAULT 0,
+                    numeros TEXT NOT NULL,
+                    refer TEXT,
+                    indicados TEXT
+                )
+            """)
+            conn.commit()
 
 def criar_tabela_numeros_sms():
-    with get_db_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS numeros_sms (
-                aid TEXT PRIMARY KEY,
-                user_id TEXT,
-                price DOUBLE PRECISION,
-                cancelado BOOLEAN DEFAULT FALSE,
-                sms_recebido BOOLEAN DEFAULT FALSE,
-                data_criacao TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        conn.commit()
+    with get_db_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS numeros_sms (
+                    aid TEXT PRIMARY KEY,
+                    user_id TEXT,
+                    price DOUBLE PRECISION,
+                    cancelado BOOLEAN DEFAULT FALSE,
+                    sms_recebido BOOLEAN DEFAULT FALSE,
+                    data_criacao TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            conn.commit()
 
 def criar_tabela_payments():
-    with get_db_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS payments (
-                id TEXT PRIMARY KEY,
-                raw JSONB,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        conn.commit()
+    with get_db_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS payments (
+                    id TEXT PRIMARY KEY,
+                    raw JSONB,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            conn.commit()
 
+# cria tabelas
 criar_tabela_usuarios()
 criar_tabela_numeros_sms()
 criar_tabela_payments()
@@ -95,7 +168,8 @@ criar_tabela_payments()
 # =========================================================
 class TelegramLogHandler(logging.Handler):
     def emit(self, record):
-        if not alert_bot or not ALERT_CHAT_ID:
+        # manda só WARNING+ pro bot de alerta (reduz carga)
+        if not alert_bot or not ALERT_CHAT_ID or record.levelno < logging.WARNING:
             return
         msg = self.format(record)
         try:
@@ -106,7 +180,7 @@ class TelegramLogHandler(logging.Handler):
 logger = logging.getLogger("bot_sms")
 logger.setLevel(logging.INFO)
 handler = TelegramLogHandler()
-handler.setFormatter(logging.Formatter("%Y-%m-%d %H:%M:%S,000 - %(levelname)s - %(message)s"))
+handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
 logger.addHandler(handler)
 
 # =========================================================
@@ -150,12 +224,9 @@ def get_service_code(key):
 def set_china2_service_code(new_code, reason=""):
     with SERVICE_CODE_LOCK:
         old = GLOBAL_SERVICE_MAP['china2']
-        if new_code == old:
-            # nada mudou — evita poluir o log
-            logger.debug(f"[SCANNER] China2 já está em {old}; sem mudanças.")
+        if old == new_code:
             return
         GLOBAL_SERVICE_MAP['china2'] = new_code
-    # só loga/avisa quando muda
     logger.info(f"[SCANNER] China2: {old} → {new_code} {('['+reason+']') if reason else ''}")
     try:
         if admin_bot and ADMIN_CHAT_ID:
@@ -181,115 +252,122 @@ PRAZO_SEGUNDOS   = PRAZO_MINUTOS * 60
 # ======================== USUÁRIO =========================
 # =========================================================
 def carregar_usuario(uid):
-    with get_db_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT * FROM usuarios WHERE id=%s", (str(uid),))
-        user = cur.fetchone()
-        if not user:
-            return None
-        user['numeros'] = json.loads(user['numeros'])
-        user['indicados'] = json.loads(user.get('indicados', '[]') or '[]')
-        return user
+    with get_db_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM usuarios WHERE id=%s", (str(uid),))
+            user = cur.fetchone()
+            if not user:
+                return None
+            user['numeros'] = json.loads(user['numeros'])
+            user['indicados'] = json.loads(user.get('indicados', '[]') or '[]')
+            return user
 
 def salvar_usuario(user):
-    with get_db_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
-            UPDATE usuarios SET saldo=%s, numeros=%s, refer=%s, indicados=%s WHERE id=%s
-        """, (
-            user['saldo'],
-            json.dumps(user['numeros']),
-            user.get('refer'),
-            json.dumps(user.get('indicados', [])),
-            str(user['id'])
-        ))
-        conn.commit()
+    with get_db_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                UPDATE usuarios SET saldo=%s, numeros=%s, refer=%s, indicados=%s WHERE id=%s
+            """, (
+                user['saldo'],
+                json.dumps(user['numeros']),
+                user.get('refer'),
+                json.dumps(user.get('indicados', [])),
+                str(user['id'])
+            ))
+            conn.commit()
     try:
         exportar_backup_json()
     except Exception as e:
         logger.error(f"Erro ao enviar backup: {e}")
 
 def criar_usuario(uid, refer=None):
-    with get_db_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id FROM usuarios WHERE id=%s", (str(uid),))
-        exists = cur.fetchone()
-        if exists:
-            return
-        cur.execute("""
-            INSERT INTO usuarios (id, saldo, numeros, refer, indicados)
-            VALUES (%s, %s, %s, %s, %s)
-        """, (str(uid), 0.0, json.dumps([]), refer, json.dumps([])))
-        conn.commit()
-        logger.info(f"Novo usuário criado: {uid}")
-        if refer and str(refer) != str(uid):
-            cur.execute("SELECT indicados FROM usuarios WHERE id=%s", (str(refer),))
-            result = cur.fetchone()
-            if result:
-                indicados = json.loads(result['indicados'] or "[]")
-                if str(uid) not in indicados:
-                    indicados.append(str(uid))
-                    cur.execute("UPDATE usuarios SET indicados=%s WHERE id=%s", (json.dumps(indicados), str(refer)))
-                    conn.commit()
+    with get_db_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT id FROM usuarios WHERE id=%s", (str(uid),))
+            exists = cur.fetchone()
+            if exists:
+                return
+            cur.execute("""
+                INSERT INTO usuarios (id, saldo, numeros, refer, indicados)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (str(uid), 0.0, json.dumps([]), refer, json.dumps([])))
+            conn.commit()
+            logger.info(f"Novo usuário criado: {uid}")
+            if refer and str(refer) != str(uid):
+                cur.execute("SELECT indicados FROM usuarios WHERE id=%s", (str(refer),))
+                result = cur.fetchone()
+                if result:
+                    indicados = json.loads(result['indicados'] or "[]")
+                    if str(uid) not in indicados:
+                        indicados.append(str(uid))
+                        cur.execute("UPDATE usuarios SET indicados=%s WHERE id=%s", (json.dumps(indicados), str(refer)))
+                        conn.commit()
 
 def get_user_ref_link(uid):
     return f"https://t.me/{bot.get_me().username}?start={uid}"
 
 def exportar_backup_json():
-    with get_db_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT * FROM usuarios")
-        users = cur.fetchall()
-        for u in users:
-            u['numeros'] = json.loads(u['numeros'])
-            u['indicados'] = json.loads(u.get('indicados', '[]') or '[]')
-        with open("usuarios_backup.json", "w", encoding="utf-8") as f:
-            json.dump(users, f, indent=2, ensure_ascii=False)
-        enviar_documento_bot(backup_bot, BACKUP_CHAT_ID, "usuarios_backup.json")
+    with get_db_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM usuarios")
+            users = cur.fetchall()
+            for u in users:
+                u['numeros'] = json.loads(u['numeros'])
+                u['indicados'] = json.loads(u.get('indicados', '[]') or '[]')
+            with open("usuarios_backup.json", "w", encoding="utf-8") as f:
+                json.dump(users, f, indent=2, ensure_ascii=False)
+            enviar_documento_bot(backup_bot, BACKUP_CHAT_ID, "usuarios_backup.json")
 
 # =========================================================
 # ============= SALDO / NÚMEROS (mantido) =================
 # =========================================================
 def comprar_numero_atomico(uid, aid, price):
-    with get_db_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT saldo, numeros FROM usuarios WHERE id=%s FOR UPDATE", (str(uid),))
-        user = cur.fetchone()
-        if not user:
-            return False
-        saldo = user['saldo']
-        numeros = json.loads(user['numeros'])
-        if saldo < price:
-            return False
-        if aid in numeros:
-            return False
-        saldo -= price
-        numeros.append(aid)
-        cur.execute("""
-            UPDATE usuarios SET saldo=%s, numeros=%s WHERE id=%s
-        """, (saldo, json.dumps(numeros), str(uid)))
-        cur.execute("""
-            INSERT INTO numeros_sms (aid, user_id, price, cancelado, sms_recebido)
-            VALUES (%s, %s, %s, FALSE, FALSE)
-            ON CONFLICT (aid) DO NOTHING
-        """, (aid, str(uid), price))
-        conn.commit()
+    with get_db_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT saldo, numeros FROM usuarios WHERE id=%s FOR UPDATE", (str(uid),))
+            user = cur.fetchone()
+            if not user:
+                return False
+            saldo = user['saldo']
+            numeros = json.loads(user['numeros'])
+            if saldo < price:
+                return False
+            if aid in numeros:
+                return False
+            saldo -= price
+            numeros.append(aid)
+            cur.execute("""
+                UPDATE usuarios SET saldo=%s, numeros=%s WHERE id=%s
+            """, (saldo, json.dumps(numeros), str(uid)))
+            cur.execute("""
+                INSERT INTO numeros_sms (aid, user_id, price, cancelado, sms_recebido)
+                VALUES (%s, %s, %s, FALSE, FALSE)
+                ON CONFLICT (aid) DO NOTHING
+            """, (aid, str(uid), price))
+            conn.commit()
     exportar_backup_json()
     logger.info(f"Saldo de {uid} atualizado. Nº {aid} associado.")
     return True
 
 def marcar_cancelado_e_devolver(uid, aid):
-    with get_db_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT cancelado, price FROM numeros_sms WHERE aid=%s FOR UPDATE", (aid,))
-        row = cur.fetchone()
-        if not row or row['cancelado']:
-            return False
-        price = row['price']
-        cur.execute("UPDATE numeros_sms SET cancelado=TRUE WHERE aid=%s", (aid,))
-        cur.execute("UPDATE usuarios SET saldo=saldo+%s WHERE id=%s", (price, str(uid)))
-        conn.commit()
+    with get_db_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT cancelado, price FROM numeros_sms WHERE aid=%s FOR UPDATE", (aid,))
+            row = cur.fetchone()
+            if not row or row['cancelado']:
+                return False
+            price = row['price']
+            cur.execute("UPDATE numeros_sms SET cancelado=TRUE WHERE aid=%s", (aid,))
+            cur.execute("UPDATE usuarios SET saldo=saldo+%s WHERE id=%s", (price, str(uid)))
+            conn.commit()
     exportar_backup_json()
     return True
 
 def registrar_sms_recebido(aid):
-    with get_db_conn() as conn, conn.cursor() as cur:
-        cur.execute("UPDATE numeros_sms SET sms_recebido=TRUE WHERE aid=%s", (aid,))
-        conn.commit()
+    with get_db_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("UPDATE numeros_sms SET sms_recebido=TRUE WHERE aid=%s", (aid,))
+            conn.commit()
 
 # =========================================================
 # ================== SMSBOWER (mantido) ===================
@@ -323,10 +401,14 @@ def solicitar_numero(servico, max_price=None):
     if max_price is not None:
         params['maxPrice'] = f"{max_price:.3f}"  # suporta 0.001
     try:
-        r = requests.get(SMSBOWER_URL, params=params, timeout=15)
+        r = HTTP.get(SMSBOWER_URL, params=params, timeout=15)
         r.raise_for_status()
         text = r.text.strip()
-        logger.info(f"GET_NUMBER → {text}")
+        # só loga sucesso/erros; evita flood
+        if text.startswith("ACCESS_NUMBER:"):
+            logging.info(f"GET_NUMBER OK")
+        else:
+            logging.debug(f"GET_NUMBER → {text}")
     except Exception as e:
         logger.error(f"Erro getNumber: {e}")
         return {"status":"error","message":str(e)}
@@ -337,7 +419,7 @@ def solicitar_numero(servico, max_price=None):
 
 def cancelar_numero(aid):
     try:
-        requests.get(
+        HTTP.get(
             SMSBOWER_URL,
             params={'api_key':API_KEY_SMSBOWER, 'action':'setStatus','status':'8','id':aid},
             timeout=10
@@ -348,7 +430,7 @@ def cancelar_numero(aid):
 
 def obter_status(aid):
     try:
-        r = requests.get(
+        r = HTTP.get(
             SMSBOWER_URL,
             params={'api_key':API_KEY_SMSBOWER,'action':'getStatus','id':aid},
             timeout=10
@@ -392,7 +474,7 @@ def spawn_sms_thread(aid):
                         )
                 return
             code = status.split(':', 1)[1] if ':' in status else status
-            if code not in info['codes']]:
+            if code not in info['codes']:
                 info['codes'].append(code)
                 registrar_sms_recebido(aid)
                 rt = datetime.now().strftime('%d/%m/%Y %H:%M:%S')
@@ -630,7 +712,6 @@ def cb_comprar(c):
     except Exception:
         pass
 
-    # ===== Tentativas da menor pra maior =====
     attempt_prices = []
     if key == 'china2':
         attempt_prices = [round(i/1000, 3) for i in range(1, 100+1)]  # 0.001..0.100
@@ -640,8 +721,8 @@ def cb_comprar(c):
         attempt_prices = [round(i/100, 2) for i in range(1, 19+1)]    # 0.01..0.19
 
     resp = {}
-    for mp in attempt_prices:
-        resp = solicitar_numero(idsms[key], max_price=mp)
+    for mpv in attempt_prices:
+        resp = solicitar_numero(idsms[key], max_price=mpv)
         if resp.get('status') == 'success':
             break
     if resp.get('status') != 'success':
@@ -729,7 +810,7 @@ def cb_comprar(c):
 def retry_sms(c):
     aid = c.data.split('_', 1)[1]
     try:
-        requests.get(
+        HTTP.get(
             SMSBOWER_URL,
             params={'api_key':API_KEY_SMSBOWER,'action':'setStatus','status':'3','id':aid},
             timeout=10
@@ -776,9 +857,10 @@ def painel_admin():
         if action == 'enviar_mensagem':
             texto = request.form.get('texto')
             if texto:
-                with get_db_conn() as conn, conn.cursor() as cur:
-                    cur.execute("SELECT id FROM usuarios")
-                    uids = [row['id'] for row in cur.fetchall()]
+                with get_db_conn() as conn:
+                    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                        cur.execute("SELECT id FROM usuarios")
+                        uids = [row['id'] for row in cur.fetchall()]
                 enviados = 0
                 for uid in uids:
                     try:
@@ -790,24 +872,26 @@ def painel_admin():
             val = float(request.form.get('valor', '0'))
             todos = request.form.get('todos')
             uid  = request.form.get('userid')
-            with get_db_conn() as conn, conn.cursor() as cur:
-                if todos:
-                    cur.execute("UPDATE usuarios SET saldo=saldo+%s", (val,))
-                    conn.commit()
-                    msg_feedback = f"Saldo de R$ {val:.2f} adicionado a TODOS os usuários."
-                elif uid:
-                    cur.execute("UPDATE usuarios SET saldo=saldo+%s WHERE id=%s", (val, str(uid)))
-                    conn.commit()
-                    msg_feedback = f"Saldo de R$ {val:.2f} adicionado ao usuário {uid}."
+            with get_db_conn() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    if todos:
+                        cur.execute("UPDATE usuarios SET saldo=saldo+%s", (val,))
+                        conn.commit()
+                        msg_feedback = f"Saldo de R$ {val:.2f} adicionado a TODOS os usuários."
+                    elif uid:
+                        cur.execute("UPDATE usuarios SET saldo=saldo+%s WHERE id=%s", (val, str(uid)))
+                        conn.commit()
+                        msg_feedback = f"Saldo de R$ {val:.2f} adicionado ao usuário {uid}."
             exportar_backup_json()
 
-    with get_db_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT count(*) FROM numeros_sms")
-        total = cur.fetchone()['count']
-        cur.execute("SELECT count(*) FROM numeros_sms WHERE cancelado=TRUE")
-        cancelados = cur.fetchone()['count']
-        cur.execute("SELECT count(*) FROM numeros_sms WHERE sms_recebido=TRUE")
-        recebidos = cur.fetchone()['count']
+    with get_db_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT count(*) FROM numeros_sms")
+            total = cur.fetchone()['count']
+            cur.execute("SELECT count(*) FROM numeros_sms WHERE cancelado=TRUE")
+            cancelados = cur.fetchone()['count']
+            cur.execute("SELECT count(*) FROM numeros_sms WHERE sms_recebido=TRUE")
+            recebidos = cur.fetchone()['count']
 
     return render_template_string("""
         <h2>Painel Admin</h2>
@@ -856,10 +940,11 @@ def mp_webhook():
     if data.get('type') == 'payment':
         pid = data['data']['id']
         try:
-            with get_db_conn() as conn, conn.cursor() as cur:
-                cur.execute("SELECT 1 FROM payments WHERE id=%s", (str(pid),))
-                if cur.fetchone():
-                    return '', 200  # já processado
+            with get_db_conn() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute("SELECT 1 FROM payments WHERE id=%s", (str(pid),))
+                    if cur.fetchone():
+                        return '', 200  # já processado
 
             resp = mp_client.payment().get(pid)['response']
             if resp.get('status') == 'approved':
@@ -868,10 +953,12 @@ def mp_webhook():
                     uid_str, amt_str = ext.split(':', 1)
                     uid = int(uid_str)
                     amt = float(amt_str)
-                    with get_db_conn() as conn, conn.cursor() as cur:
-                        cur.execute("INSERT INTO payments (id, raw) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                                    (str(pid), json.dumps(resp)))
-                        conn.commit()
+
+                    with get_db_conn() as conn:
+                        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                            cur.execute("INSERT INTO payments (id, raw) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                                        (str(pid), json.dumps(resp)))
+                            conn.commit()
 
                     user = carregar_usuario(uid)
                     if user:
@@ -883,18 +970,20 @@ def mp_webhook():
                             ref_user = carregar_usuario(refid)
                             if ref_user:
                                 bonus = round(amt * 0.10, 2)
-                                with get_db_conn() as conn, conn.cursor() as cur:
-                                    cur.execute("UPDATE usuarios SET saldo=saldo+%s WHERE id=%s", (bonus, str(refid)))
-                                    conn.commit()
+                                with get_db_conn() as conn:
+                                    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                                        cur.execute("UPDATE usuarios SET saldo=saldo+%s WHERE id=%s", (bonus, str(refid)))
+                                        conn.commit()
                                 try:
                                     bot.send_message(int(refid), f"🎉 Você ganhou R$ {bonus:.2f} de bônus pois seu indicado recarregou saldo!")
                                 except:
                                     pass
                                 ref_text = f"\nIndicado por: {refid}\nBônus enviado: R$ {bonus:.2f}"
 
-                        with get_db_conn() as conn, conn.cursor() as cur:
-                            cur.execute("UPDATE usuarios SET saldo=saldo+%s WHERE id=%s", (amt, str(uid)))
-                            conn.commit()
+                        with get_db_conn() as conn:
+                            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                                cur.execute("UPDATE usuarios SET saldo=saldo+%s WHERE id=%s", (amt, str(uid)))
+                                conn.commit()
                         exportar_backup_json()
                         bot.send_message(uid, f"✅ Recarga de R$ {amt:.2f} confirmada! Seu novo saldo é R$ {current + amt:.2f}")
                         enviar_mensagem_bot(
@@ -914,74 +1003,65 @@ SCANNER_MIN_PRICE = 0.001
 SCANNER_MAX_PRICE = 0.100
 SCANNER_MIN_COUNT = 50
 SCANNER_COUNTRY_ID = "14"  # Brazil na resposta do getPricesByService
+_last_china2 = None  # para não logar/atualizar repetido
 
-def _pick_first_service(services_dict, expected_key):
-    """
-    Em algumas respostas a chave do dict não bate com serviceId solicitado.
-    Se não achar a chave esperada, devolve o primeiro item.
-    """
-    if expected_key in services_dict:
-        return services_dict[expected_key]
-    for _, v in services_dict.items():
-        return v
-    return None
+def _eligible_service_ids():
+    with services_index_lock:
+        return [int(sid) for sid, v in services_index.items() if v.get("activate_org_code")]
 
 def scanner_loop():
+    global _last_china2
     while True:
         try:
-            best = None  # (min_price, service_id, activate_org_code, title, count)
-            for sid in range(1, 1320):  # 1..1319
+            best = None  # (min_price, sid, aoc, title, count)
+            for sid in _eligible_service_ids():
                 url = f"https://smsbower.org/activations/getPricesByService?serviceId={sid}&withPopular=true&rank=1"
                 try:
-                    r = requests.get(url, timeout=15)
-                    r.raise_for_status()
-                except Exception:
-                    continue
-
-                try:
+                    r = HTTP.get(url, timeout=12)
+                    if r.status_code != 200:
+                        time.sleep(0.03)
+                        continue
                     payload = r.json()
                 except Exception:
+                    time.sleep(0.03)
                     continue
 
                 services = payload.get("services") or {}
-                svc = _pick_first_service(services, str(sid))
+                # alguns retornos podem não indexar pelo sid; pega o primeiro
+                svc = services.get(str(sid)) or (next(iter(services.values())) if services else None)
                 if not svc:
+                    time.sleep(0.03)
                     continue
 
-                countries = svc.get("countries") or {}
-                br = countries.get(SCANNER_COUNTRY_ID)
+                br = (svc.get("countries") or {}).get(SCANNER_COUNTRY_ID)
                 if not br:
+                    time.sleep(0.03)
                     continue
 
                 min_price = br.get("min_price")
                 count = br.get("count", 0)
-                if min_price is None:
-                    continue
                 try:
                     mpv = float(min_price)
                 except:
+                    time.sleep(0.03)
                     continue
 
                 if count > SCANNER_MIN_COUNT and (SCANNER_MIN_PRICE <= mpv <= SCANNER_MAX_PRICE):
                     with services_index_lock:
-                        si = services_index.get(str(sid))
-                    if not si:
-                        title = f"serviceId {sid}"
-                        aoc = None
-                    else:
-                        title = si.get("title") or f"serviceId {sid}"
-                        aoc = si.get("activate_org_code")
+                        si = services_index.get(str(sid)) or {}
+                    aoc = si.get("activate_org_code")
+                    title = si.get("title") or f"serviceId {sid}"
+                    if aoc and ((best is None) or (mpv < best[0])):
+                        best = (mpv, sid, aoc, title, count)
 
-                    if aoc:
-                        if (best is None) or (mpv < best[0]):
-                            best = (mpv, sid, aoc, title, count)
+                time.sleep(0.03)  # evita rajada e 429
 
             if best:
                 mpv, sid, aoc, title, count = best
-                # set_china2_service_code só loga se realmente mudar
-                set_china2_service_code(aoc, reason=f"(id:{sid}, {title}, count:{count}, min_price:{mpv})")
-                # Log resumo do melhor (fica, mas não imprime troca redundante)
-                logger.info(f"[SCANNER] Melhor China2: serviceId={sid} title={title} aoc={aoc} count={count} min_price={mpv}")
+                if _last_china2 != aoc:
+                    _last_china2 = aoc
+                    set_china2_service_code(aoc, reason=f"(id:{sid}, {title}, count:{count}, min_price:{mpv})")
+                    logger.info(f"[SCANNER] Melhor China2: serviceId={sid} title={title} aoc={aoc} count={count} min_price={mpv}")
             else:
                 logger.info("[SCANNER] Nenhum candidato elegível encontrado para China2. Mantendo atual.")
         except Exception as e:
@@ -990,11 +1070,25 @@ def scanner_loop():
         time.sleep(SCANNER_INTERVAL_SEC)
 
 # =========================================================
+# ============== STARTUP ÚNICO (Railway/Gunicorn) =========
+# =========================================================
+_scanner_started = False
+def start_background_once():
+    global _scanner_started
+    if _scanner_started:
+        return
+    _scanner_started = True
+    threading.Thread(target=scanner_loop, daemon=True).start()
+
+@app.before_first_request
+def _kickoff():
+    start_background_once()
+
+# =========================================================
 # ======================== MAIN ===========================
 # =========================================================
 if __name__ == '__main__':
-    threading.Thread(target=scanner_loop, daemon=True).start()
-
+    start_background_once()
     try:
         bot.remove_webhook()
         if SITE_URL:

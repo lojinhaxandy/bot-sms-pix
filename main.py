@@ -117,8 +117,8 @@ logger.addHandler(handler)
 # Helper para logs administrativos (saldo novo, compra/cancelamento)
 def log_admin(msg: str):
     try:
-        if admin_bot and ADMIN_CHAT_ID:
-            admin_bot.send_message(ADMIN_CHAT_ID, msg)
+        if alert_bot and ALERT_CHAT_ID:
+            alert_bot.send_message(ALERT_CHAT_ID, msg)
     except Exception:
         pass
 
@@ -179,9 +179,9 @@ def set_china2_service_code(new_code, reason="", price=None):
                 SCANNER_LAST_PRICE = p
     logger.info(f"[SCANNER] China2: {old} → {new_code} {('['+reason+']') if reason else ''}")
     try:
-        if admin_bot and ADMIN_CHAT_ID:
-            admin_bot.send_message(
-                ADMIN_CHAT_ID,
+        if alert_bot and ALERT_CHAT_ID:
+            alert_bot.send_message(
+                ALERT_CHAT_ID,
                 f"🔄 China 2 atualizado: `{old}` → `{new_code}` {reason}".strip(),
                 parse_mode='Markdown'
             )

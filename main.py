@@ -114,6 +114,14 @@ handler = TelegramLogHandler()
 handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
 logger.addHandler(handler)
 
+# Helper para logs administrativos (saldo novo, compra/cancelamento)
+def log_admin(msg: str):
+    try:
+        if admin_bot and ADMIN_CHAT_ID:
+            admin_bot.send_message(ADMIN_CHAT_ID, msg)
+    except Exception:
+        pass
+
 # =========================================================
 # ======= SERVICES JSON + MAPA DE SERVIÇOS DINÂMICO =======
 # =========================================================
@@ -189,6 +197,9 @@ status_map       = {}
 PENDING_RECHARGE = {}
 PRAZO_MINUTOS    = 23
 PRAZO_SEGUNDOS   = PRAZO_MINUTOS * 60
+
+# ====== NOVO: controle do scanner (liga/desliga via painel) ======
+SCANNER_ENABLED = True   # padrão ligado
 
 # =========================================================
 # ======================== USUÁRIO =========================
@@ -289,9 +300,12 @@ def comprar_numero_atomico(uid, aid, price):
             conn.commit()
     exportar_backup_json()
     logger.info(f"Saldo de {uid} atualizado. Nº {aid} associado.")
+    # >>> LOG ADMIN: compra com saldo novo
+    log_admin(f"🧾 *COMPRA*\nUser: `{uid}`\nAID: `{aid}`\nPreço: R$ {price:.2f}\nNovo saldo: R$ {saldo:.2f}")
     return True
 
 def marcar_cancelado_e_devolver(uid, aid):
+    novo_saldo = None
     with get_db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT cancelado, price FROM numeros_sms WHERE aid=%s FOR UPDATE", (aid,))
@@ -301,8 +315,16 @@ def marcar_cancelado_e_devolver(uid, aid):
             price = row['price']
             cur.execute("UPDATE numeros_sms SET cancelado=TRUE WHERE aid=%s", (aid,))
             cur.execute("UPDATE usuarios SET saldo=saldo+%s WHERE id=%s", (price, str(uid)))
+            # pegar saldo atualizado
+            cur.execute("SELECT saldo FROM usuarios WHERE id=%s", (str(uid),))
+            res = cur.fetchone()
+            if res:
+                novo_saldo = float(res['saldo'])
             conn.commit()
     exportar_backup_json()
+    # >>> LOG ADMIN: cancelamento/reembolso com saldo novo
+    if novo_saldo is not None:
+        log_admin(f"↩️ *CANCELAMENTO / REEMBOLSO*\nUser: `{uid}`\nAID: `{aid}`\nValor devolvido: R$ {price:.2f}\nNovo saldo: R$ {novo_saldo:.2f}")
     return True
 
 def registrar_sms_recebido(aid):
@@ -986,13 +1008,15 @@ def cancelar_user(c):
         bot.answer_callback_query(c.id, '❌ Já cancelado anteriormente.', show_alert=True)
 
 # =========================================================
-# ================== PAINEL ADMIN (igual) =================
+# ================== PAINEL ADMIN (ATUALIZADO) ============
 # =========================================================
 @app.route('/admin', methods=['GET', 'POST'])
 def painel_admin():
     token = request.args.get('token', '')
     if token != PAINEL_TOKEN:
         return "Acesso negado.", 401
+
+    global SCANNER_ENABLED  # necessário para alterar no POST
 
     msg_feedback = ""
     if request.method == 'POST':
@@ -1027,6 +1051,27 @@ def painel_admin():
                         msg_feedback = f"Saldo de R$ {val:.2f} adicionado ao usuário {uid}."
             exportar_backup_json()
 
+        # ===== NOVO: ligar/desligar scanner China 2 =====
+        elif action == 'scanner_onoff':
+            op = request.form.get('op')
+            if op == 'on':
+                SCANNER_ENABLED = True
+                msg_feedback = "Scanner China 2 LIGADO."
+            elif op == 'off':
+                SCANNER_ENABLED = False
+                msg_feedback = "Scanner China 2 DESLIGADO."
+            else:
+                msg_feedback = "Opção inválida para o scanner."
+
+        # ===== NOVO: definir manualmente serviço China 2 =====
+        elif action == 'china2_manual':
+            manual_code = (request.form.get('manual_code') or '').strip()
+            if manual_code:
+                set_china2_service_code(manual_code, reason="(manual via painel)")
+                msg_feedback = f"China 2 definido manualmente para '{manual_code}'."
+            else:
+                msg_feedback = "Informe um código de serviço válido (ex.: ki, ev, ...)."
+
     with get_db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT count(*) FROM numeros_sms")
@@ -1036,14 +1081,20 @@ def painel_admin():
             cur.execute("SELECT count(*) FROM numeros_sms WHERE sms_recebido=TRUE")
             recebidos = cur.fetchone()['count']
 
+    # status atual do scanner e código em uso para china2
+    with SERVICE_CODE_LOCK:
+        china2_code = GLOBAL_SERVICE_MAP.get('china2')
+
     return render_template_string("""
         <h2>Painel Admin</h2>
+
         <form method=post>
             <h3>Enviar mensagem para todos:</h3>
             <textarea name="texto" rows=3 cols=40 placeholder="Mensagem"></textarea><br>
             <input type="hidden" name="action" value="enviar_mensagem">
             <button type="submit">Enviar Mensagem</button>
         </form>
+
         <form method=post>
             <h3>Adicionar saldo</h3>
             <input type="hidden" name="action" value="adicionar_saldo">
@@ -1052,6 +1103,23 @@ def painel_admin():
             ou ID: <input name="userid" type="text" placeholder="UserID">
             <button type="submit">Adicionar Saldo</button>
         </form>
+
+        <hr>
+        <h3>Scanner China 2</h3>
+        <p>Status: <b>{{ 'Ligado' if scanner_enabled else 'Desligado' }}</b></p>
+        <p>Serviço China 2 atual: <code>{{ china2_code }}</code></p>
+        <form method="post" style="display:inline-block; margin-right: 10px;">
+            <input type="hidden" name="action" value="scanner_onoff">
+            <input type="hidden" name="op" value="{{ 'off' if scanner_enabled else 'on' }}">
+            <button type="submit">{{ 'Desligar' if scanner_enabled else 'Ligar' }} scanner</button>
+        </form>
+        <form method="post" style="display:inline-block;">
+            <input type="hidden" name="action" value="china2_manual">
+            Definir manualmente código: 
+            <input name="manual_code" type="text" placeholder="ex.: ki, ev, ..." required>
+            <button type="submit">Aplicar</button>
+        </form>
+
         <hr>
         <b>{{msg_feedback}}</b>
         <hr>
@@ -1061,7 +1129,8 @@ def painel_admin():
             <li>Números cancelados: {{cancelados}}</li>
             <li>Números que receberam SMS: {{recebidos}}</li>
         </ul>
-    """, msg_feedback=msg_feedback, total=total, cancelados=cancelados, recebidos=recebidos)
+    """, msg_feedback=msg_feedback, total=total, cancelados=cancelados, recebidos=recebidos,
+       scanner_enabled=SCANNER_ENABLED, china2_code=china2_code)
 
 # =========================================================
 # =================== HEALTH / WEBHOOKS ===================
@@ -1146,6 +1215,12 @@ SCANNER_COUNTRY_ID = "14"  # Brazil na resposta do getPricesByService
 def scanner_loop():
     while True:
         try:
+            # >>> NOVO: respeitar o liga/desliga do painel
+            if not SCANNER_ENABLED:
+                logger.info("[SCANNER] Pausado (desligado pelo admin).")
+                time.sleep(SCANNER_INTERVAL_SEC)
+                continue
+
             best = None  # (min_price, service_id, activate_org_code, title, count)
             for sid in range(1, 1320):  # 1..1319
                 url = f"https://smsbower.org/activations/getPricesByService?serviceId={sid}&withPopular=true&rank=1"

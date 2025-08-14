@@ -32,7 +32,7 @@ DATABASE_URL      = os.getenv("DATABASE_URL")
 PAINEL_TOKEN      = os.getenv("PAINEL_TOKEN") or "painel2024"
 SERVICES_JSON     = os.getenv("SERVICES_JSON") or "services.json"  # caminho do JSON que você já tem
 
-# >>> NOVO: API sms24h (Servidor 2) — sem default (apenas env)
+# >>> API sms24h (Servidor 2)
 SMS24H_URL        = "https://api.sms24h.org/stubs/handler_api"
 API_KEY_SMS24H    = os.getenv("API_KEY_SMS24H")  # defina no ambiente
 
@@ -299,7 +299,6 @@ def marcar_cancelado_e_devolver(uid, aid):
             if not row or row['cancelado']:
                 return False
             price = row['price']
-            # FIX: coluna correta é aid
             cur.execute("UPDATE numeros_sms SET cancelado=TRUE WHERE aid=%s", (aid,))
             cur.execute("UPDATE usuarios SET saldo=saldo+%s WHERE id=%s", (price, str(uid)))
             conn.commit()
@@ -309,7 +308,6 @@ def marcar_cancelado_e_devolver(uid, aid):
 def registrar_sms_recebido(aid):
     with get_db_conn() as conn:
         with conn.cursor() as cur:
-            # FIX: coluna correta é aid
             cur.execute("UPDATE numeros_sms SET sms_recebido=TRUE WHERE aid=%s", (aid,))
             conn.commit()
 
@@ -528,14 +526,16 @@ def callback_menu(c):
 
 def show_comprar_menu(chat_id):
     kb = telebot.types.InlineKeyboardMarkup(row_width=1)
+    # ordem pedida: abaixo de Mercado Pago, inserir Mercado Pago SMS Servidor 2
     kb.add(
         telebot.types.InlineKeyboardButton('📲 Mercado Pago SMS - R$0.75', callback_data='comprar_mercado'),
+        telebot.types.InlineKeyboardButton('🛰️ Mercado Pago SMS Servidor 2 - R$0.65', callback_data='comprar_mpsrv2'),
         telebot.types.InlineKeyboardButton('🇨🇳 SMS para China   - R$0.60', callback_data='comprar_china'),
         telebot.types.InlineKeyboardButton('🇨🇳 SMS para China 2 - R$0.60', callback_data='comprar_china2'),
         telebot.types.InlineKeyboardButton('💸 PicPay SMS       - R$0.65', callback_data='comprar_picpay'),
+        telebot.types.InlineKeyboardButton('🛰️ PicPay SMS Servidor 2 - R$0.70', callback_data='comprar_picsrv2'),
         telebot.types.InlineKeyboardButton('📡 Outros SMS        - R$1.10', callback_data='comprar_outros'),
-        # >>> NOVO botão
-        telebot.types.InlineKeyboardButton('🛰️ Outros SMS Servidor 2    - R$0.77', callback_data='comprar_srv2')
+        telebot.types.InlineKeyboardButton('🛰️ Outros SMS Servidor 2    - R$0.77', callback_data='comprar_srv2'),
     )
     bot.send_message(chat_id, 'Escolha serviço:', reply_markup=kb)
 
@@ -645,35 +645,49 @@ def menu_refer(c):
 def cb_comprar(c):
     user_id, key = c.from_user.id, c.data.split('_')[1]
     criar_usuario(user_id)
+
+    # novos preços/nomes/ids
     prices = {
-        'mercado':0.75,
-        'china':0.60,
-        'china2':0.60,
-        'picpay':0.65,
-        'outros':1.10,
-        'srv2':0.77  # NOVO
+        'mercado':  0.75,
+        'mpsrv2':   0.65,  # NOVO: Mercado Pago SMS Servidor 2 (sms24h)
+        'china':    0.60,
+        'china2':   0.60,
+        'picpay':   0.65,
+        'picsrv2':  0.70,  # NOVO: PicPay SMS Servidor 2 (sms24h)
+        'outros':   1.10,
+        'srv2':     0.77   # Outros SMS Servidor 2 (sms24h)
     }
-    names  = {
-        'mercado':'Mercado Pago SMS',
-        'china':'SMS para China',
-        'china2':'SMS para China 2',
-        'picpay':'PicPay SMS',
-        'outros':'Outros SMS',
-        'srv2':'Outros SMS Servidor 2'
+    names = {
+        'mercado': 'Mercado Pago SMS',
+        'mpsrv2':  'Mercado Pago SMS Servidor 2',
+        'china':   'SMS para China',
+        'china2':  'SMS para China 2',
+        'picpay':  'PicPay SMS',
+        'picsrv2': 'PicPay SMS Servidor 2',
+        'outros':  'Outros SMS',
+        'srv2':    'Outros SMS Servidor 2'
     }
-    idsms  = {
-        'mercado': get_service_code('mercado'),
-        'china':   get_service_code('china'),
-        'china2':  get_service_code('china2'),
-        'picpay':  get_service_code('picpay'),
-        'outros':  get_service_code('outros'),
-        'srv2':    'ot'  # sms24h
+    idsms = {
+        'mercado': get_service_code('mercado'),  # smsbower
+        'mpsrv2':  'cq',                         # sms24h - Mercado
+        'china':   get_service_code('china'),    # smsbower
+        'china2':  get_service_code('china2'),   # smsbower
+        'picpay':  get_service_code('picpay'),   # smsbower
+        'picsrv2': 'ev',                         # sms24h - PicPay
+        'outros':  get_service_code('outros'),   # smsbower
+        'srv2':    'ot'                          # sms24h - Outros
     }
 
     balance = carregar_usuario(user_id)['saldo']
-    price, service = prices[key], names[key]
+    price   = prices.get(key)
+    service = names.get(key)
+
+    if price is None:
+        return bot.answer_callback_query(c.id, '❌ Opção inválida.', True)
+
     if balance < price:
         return bot.answer_callback_query(c.id, '❌ Saldo insuficiente.', True)
+
     try:
         bot.edit_message_text('⏳ Solicitando número...', c.message.chat.id, c.message.message_id)
     except telebot.apihelper.ApiTelegramException as e:
@@ -681,8 +695,9 @@ def cb_comprar(c):
     except Exception:
         pass
 
-    # ============ fluxo especial: SMS Servidor 2 (sms24h) ============
-    if key == 'srv2':
+    # ============ fluxo especial: sms24h (Servidor 2) ============
+    # keys que usam sms24h: srv2, mpsrv2, picsrv2
+    if key in ('srv2', 'mpsrv2', 'picsrv2'):
         resp = solicitar_numero_sms24h(idsms[key], operator="tim", country=COUNTRY_ID)
         if resp.get('status') != 'success':
             return bot.send_message(c.message.chat.id, '🚫 Sem números disponíveis.')
@@ -725,6 +740,7 @@ def cb_comprar(c):
             'provider':   'sms24h'
         }
         spawn_sms_thread(aid)
+
         def countdown():
             for minute in range(PRAZO_MINUTOS):
                 time.sleep(60)
@@ -745,6 +761,7 @@ def cb_comprar(c):
                     if "message is not modified" not in str(e): raise
                 except Exception:
                     pass
+
         def auto_cancel():
             time.sleep(PRAZO_SEGUNDOS)
             info = status_map.get(aid)
@@ -754,6 +771,7 @@ def cb_comprar(c):
                 if ok2:
                     try: bot.delete_message(info['chat_id'], info['message_id'])
                     except: pass
+
         threading.Thread(target=countdown, daemon=True).start()
         threading.Thread(target=auto_cancel, daemon=True).start()
         return
@@ -764,10 +782,7 @@ def cb_comprar(c):
     if key == 'china2':
         with SCANNER_PRICE_LOCK:
             mp = SCANNER_LAST_PRICE
-        if mp is not None:
-            max_price = float(mp)
-        else:
-            max_price = obter_menor_preco_v2(idsms[key], COUNTRY_ID)
+        max_price = float(mp) if mp is not None else obter_menor_preco_v2(idsms[key], COUNTRY_ID)
     else:
         max_price = obter_menor_preco_v2(idsms[key], COUNTRY_ID)
 
@@ -889,14 +904,10 @@ def spawn_sms_thread(aid):
                         bot.send_message(chat_id, f"❌ Cancelado pelo provider. R${info['price']:.2f} devolvido.")
                 return
 
-            # pega payload após o primeiro ':', senão a string inteira
             payload = status.split(':', 1)[1] if ':' in status else status
 
-            # sms24h: mostrar mensagem COMPLETA (ex.: "456BET?seu codigo ...")
-            if provider == 'sms24h' and status.startswith('STATUS_OK:'):
-                display = payload
-            else:
-                display = payload
+            # sms24h: mostrar mensagem completa quando vier STATUS_OK:...
+            display = payload
 
             if display not in info['codes']:
                 info['codes'].append(display)

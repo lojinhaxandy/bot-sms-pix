@@ -548,7 +548,7 @@ def callback_menu(c):
 
 def show_comprar_menu(chat_id):
     kb = telebot.types.InlineKeyboardMarkup(row_width=1)
-    # ordem pedida + novos WhatsApp
+    # ordem pedida: abaixo de Mercado Pago, inserir Mercado Pago SMS Servidor 2
     kb.add(
         telebot.types.InlineKeyboardButton('📲 Mercado Pago SMS - R$0.75', callback_data='comprar_mercado'),
         telebot.types.InlineKeyboardButton('🛰️ Mercado Pago SMS Servidor 2 - R$0.65', callback_data='comprar_mpsrv2'),
@@ -558,8 +558,6 @@ def show_comprar_menu(chat_id):
         telebot.types.InlineKeyboardButton('🛰️ PicPay SMS Servidor 2 - R$0.70', callback_data='comprar_picsrv2'),
         telebot.types.InlineKeyboardButton('📡 Outros SMS        - R$1.10', callback_data='comprar_outros'),
         telebot.types.InlineKeyboardButton('🛰️ Outros SMS Servidor 2    - R$0.77', callback_data='comprar_srv2'),
-        telebot.types.InlineKeyboardButton('🟢 WhatsApp 1 (SMSBower) - R$6.00', callback_data='comprar_wa1'),
-        telebot.types.InlineKeyboardButton('🛰️ WhatsApp 2 (Servidor 2) - R$7.00', callback_data='comprar_wa2'),
     )
     bot.send_message(chat_id, 'Escolha serviço:', reply_markup=kb)
 
@@ -670,18 +668,16 @@ def cb_comprar(c):
     user_id, key = c.from_user.id, c.data.split('_')[1]
     criar_usuario(user_id)
 
-    # novos preços/nomes/ids (R$)
+    # novos preços/nomes/ids
     prices = {
         'mercado':  0.75,
-        'mpsrv2':   0.65,  # Mercado Pago SMS Servidor 2 (sms24h)
+        'mpsrv2':   0.65,  # NOVO: Mercado Pago SMS Servidor 2 (sms24h)
         'china':    0.60,
         'china2':   0.60,
         'picpay':   0.65,
-        'picsrv2':  0.70,  # PicPay SMS Servidor 2 (sms24h)
+        'picsrv2':  0.70,  # NOVO: PicPay SMS Servidor 2 (sms24h)
         'outros':   1.10,
-        'srv2':     0.77,  # Outros SMS Servidor 2 (sms24h)
-        'wa1':      6.00,  # WhatsApp 1 (smsbower)
-        'wa2':      7.00,  # WhatsApp 2 (sms24h)
+        'srv2':     0.77   # Outros SMS Servidor 2 (sms24h)
     }
     names = {
         'mercado': 'Mercado Pago SMS',
@@ -691,9 +687,7 @@ def cb_comprar(c):
         'picpay':  'PicPay SMS',
         'picsrv2': 'PicPay SMS Servidor 2',
         'outros':  'Outros SMS',
-        'srv2':    'Outros SMS Servidor 2',
-        'wa1':     'WhatsApp 1',
-        'wa2':     'WhatsApp 2',
+        'srv2':    'Outros SMS Servidor 2'
     }
     idsms = {
         'mercado': get_service_code('mercado'),  # smsbower
@@ -703,9 +697,7 @@ def cb_comprar(c):
         'picpay':  get_service_code('picpay'),   # smsbower
         'picsrv2': 'ev',                         # sms24h - PicPay
         'outros':  get_service_code('outros'),   # smsbower
-        'srv2':    'ot',                         # sms24h - Outros
-        'wa1':     'wa',                         # smsbower - WhatsApp
-        'wa2':     'wa',                         # sms24h  - WhatsApp
+        'srv2':    'ot'                          # sms24h - Outros
     }
 
     balance = carregar_usuario(user_id)['saldo']
@@ -726,8 +718,8 @@ def cb_comprar(c):
         pass
 
     # ============ fluxo especial: sms24h (Servidor 2) ============
-    # keys que usam sms24h: srv2, mpsrv2, picsrv2, wa2
-    if key in ('srv2', 'mpsrv2', 'picsrv2', 'wa2'):
+    # keys que usam sms24h: srv2, mpsrv2, picsrv2
+    if key in ('srv2', 'mpsrv2', 'picsrv2'):
         resp = solicitar_numero_sms24h(idsms[key], operator="tim", country=COUNTRY_ID)
         if resp.get('status') != 'success':
             return bot.send_message(c.message.chat.id, '🚫 Sem números disponíveis.')
@@ -808,6 +800,7 @@ def cb_comprar(c):
 
     # ================== fluxo normal (smsbower) ==================
     # determinar menor preço
+    max_price = None
     if key == 'china2':
         with SCANNER_PRICE_LOCK:
             mp = SCANNER_LAST_PRICE
@@ -815,15 +808,8 @@ def cb_comprar(c):
     else:
         max_price = obter_menor_preco_v2(idsms[key], COUNTRY_ID)
 
-    # limite por serviço:
-    # - wa1 (WhatsApp via smsbower) até 0.70 (USD)
-    # - outros até 0.20, demais até 0.10
-    if key == 'wa1':
-        limite = 0.70
-    elif key == 'outros':
-        limite = 0.20
-    else:
-        limite = 0.10
+    # limite por serviço: outros até 0.20, demais até 0.10
+    limite = 0.20 if key == 'outros' else 0.10
 
     if (max_price is None) or (float(max_price) > limite):
         return bot.send_message(c.message.chat.id, '🚫 Sem números disponíveis.')
@@ -1299,4 +1285,3 @@ if __name__ == '__main__':
     except Exception as e:
         logger.error(f"Erro set_webhook: {e}")
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
-

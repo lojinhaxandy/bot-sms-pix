@@ -945,7 +945,7 @@ def spawn_sms_thread(aid):
             # sms24h: mostrar mensagem completa quando vier STATUS_OK:...
             display = payload
 
-            if display not in info['codes']]:
+            if display not in info['codes']:
                 info['codes'].append(display)
                 registrar_sms_recebido(aid)
                 rt = datetime.now().strftime('%d/%m/%Y %H:%M:%S')
@@ -1299,3 +1299,4 @@ if __name__ == '__main__':
     except Exception as e:
         logger.error(f"Erro set_webhook: {e}")
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+

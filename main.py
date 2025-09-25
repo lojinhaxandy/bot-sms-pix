@@ -392,7 +392,7 @@ def obter_status_smsbower(aid):
     try:
         r = requests.get(
             SMSBOWER_URL,
-            params={'api_key':API_KEY_SMSBOWER,'action':'getStatus','id':aid},
+            params={'api_key': API_KEY_SMSBOWER,'action':'getStatus','id':aid},
             timeout=10
         )
         r.raise_for_status()
@@ -525,6 +525,57 @@ def obter_menor_preco_v2(service_code, country_id):
     candidatos.sort()
     return candidatos[0]
 
+# ========= preço WA especial: decrescente até <= 0.7 com qty>1 =========
+def obter_preco_wa_desc_v2(service_code, country_id, max_usd=0.7):
+    """
+    Lê getPricesV2 e retorna o MAIOR preço <= max_usd cuja quantidade > 1.
+    Se não encontrar, retorna None.
+    """
+    try:
+        r = requests.get(
+            SMSBOWER_URL,
+            params={
+                'api_key': API_KEY_SMSBOWER,
+                'action': 'getPricesV2',
+                'service': service_code,
+                'country': country_id
+            },
+            timeout=12
+        )
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        logger.error(f"[getPricesV2/WA] erro: {e}")
+        return None
+
+    country_map = data.get(str(country_id)) or data.get(country_id) or {}
+    svc_map = country_map.get(service_code) or {}
+    if not isinstance(svc_map, dict) or not svc_map:
+        return None
+
+    # construir lista (preco, qty) e filtrar <= max_usd com qty>1
+    candidatos = []
+    for price_str, qty in svc_map.items():
+        try:
+            p = float(str(price_str).replace(',', '.'))
+        except:
+            continue
+        try:
+            q = int(qty)
+        except:
+            q = 0
+        if p <= max_usd and q > 1:
+            candidatos.append((p, q))
+
+    if not candidatos:
+        return None
+
+    # ordenar do MAIOR para o MENOR e pegar o primeiro
+    candidatos.sort(key=lambda x: x[0], reverse=True)
+    escolhido = candidatos[0][0]
+    logger.info(f"[WA] preço escolhido (desc <= {max_usd} c/ qty>1): {escolhido}")
+    return escolhido
+
 # =========================================================
 # ====================== MENUS (iguais) ===================
 # =========================================================
@@ -548,7 +599,6 @@ def callback_menu(c):
 
 def show_comprar_menu(chat_id):
     kb = telebot.types.InlineKeyboardMarkup(row_width=1)
-    # ordem pedida: abaixo de Mercado Pago, inserir Mercado Pago SMS Servidor 2
     kb.add(
         telebot.types.InlineKeyboardButton('📲 Mercado Pago SMS - R$0.75', callback_data='comprar_mercado'),
         telebot.types.InlineKeyboardButton('🛰️ Mercado Pago SMS Servidor 2 - R$0.65', callback_data='comprar_mpsrv2'),
@@ -556,6 +606,8 @@ def show_comprar_menu(chat_id):
         telebot.types.InlineKeyboardButton('🇨🇳 SMS para China 2 - R$0.60', callback_data='comprar_china2'),
         telebot.types.InlineKeyboardButton('💸 PicPay SMS       - R$0.65', callback_data='comprar_picpay'),
         telebot.types.InlineKeyboardButton('🛰️ PicPay SMS Servidor 2 - R$0.70', callback_data='comprar_picsrv2'),
+        telebot.types.InlineKeyboardButton('💬 WhatsApp Srv1 - R$6,50', callback_data='comprar_wa1'),
+        telebot.types.InlineKeyboardButton('🛰️ WhatsApp Srv2 - R$7,00', callback_data='comprar_wa2'),
         telebot.types.InlineKeyboardButton('📡 Outros SMS        - R$1.10', callback_data='comprar_outros'),
         telebot.types.InlineKeyboardButton('🛰️ Outros SMS Servidor 2    - R$0.77', callback_data='comprar_srv2'),
     )
@@ -671,13 +723,15 @@ def cb_comprar(c):
     # novos preços/nomes/ids
     prices = {
         'mercado':  0.75,
-        'mpsrv2':   0.65,  # NOVO: Mercado Pago SMS Servidor 2 (sms24h)
+        'mpsrv2':   0.65,   # Mercado Pago SMS Servidor 2 (sms24h)
         'china':    0.60,
         'china2':   0.60,
         'picpay':   0.65,
-        'picsrv2':  0.70,  # NOVO: PicPay SMS Servidor 2 (sms24h)
+        'picsrv2':  0.70,   # PicPay SMS Servidor 2 (sms24h)
+        'wa1':      6.50,   # WhatsApp Servidor 1 (smsbower)
+        'wa2':      7.00,   # WhatsApp Servidor 2 (sms24h)
         'outros':   1.10,
-        'srv2':     0.77   # Outros SMS Servidor 2 (sms24h)
+        'srv2':     0.77    # Outros SMS Servidor 2 (sms24h)
     }
     names = {
         'mercado': 'Mercado Pago SMS',
@@ -686,6 +740,8 @@ def cb_comprar(c):
         'china2':  'SMS para China 2',
         'picpay':  'PicPay SMS',
         'picsrv2': 'PicPay SMS Servidor 2',
+        'wa1':     'WhatsApp Servidor 1',
+        'wa2':     'WhatsApp Servidor 2',
         'outros':  'Outros SMS',
         'srv2':    'Outros SMS Servidor 2'
     }
@@ -696,6 +752,8 @@ def cb_comprar(c):
         'china2':  get_service_code('china2'),   # smsbower
         'picpay':  get_service_code('picpay'),   # smsbower
         'picsrv2': 'ev',                         # sms24h - PicPay
+        'wa1':     'wa',                         # smsbower - WhatsApp
+        'wa2':     'wa',                         # sms24h  - WhatsApp
         'outros':  get_service_code('outros'),   # smsbower
         'srv2':    'ot'                          # sms24h - Outros
     }
@@ -718,8 +776,8 @@ def cb_comprar(c):
         pass
 
     # ============ fluxo especial: sms24h (Servidor 2) ============
-    # keys que usam sms24h: srv2, mpsrv2, picsrv2
-    if key in ('srv2', 'mpsrv2', 'picsrv2'):
+    # keys que usam sms24h: srv2, mpsrv2, picsrv2, wa2
+    if key in ('srv2', 'mpsrv2', 'picsrv2', 'wa2'):
         resp = solicitar_numero_sms24h(idsms[key], operator="tim", country=COUNTRY_ID)
         if resp.get('status') != 'success':
             return bot.send_message(c.message.chat.id, '🚫 Sem números disponíveis.')
@@ -799,17 +857,20 @@ def cb_comprar(c):
         return
 
     # ================== fluxo normal (smsbower) ==================
-    # determinar menor preço
-    max_price = None
+    # determinar max_price
     if key == 'china2':
         with SCANNER_PRICE_LOCK:
             mp = SCANNER_LAST_PRICE
         max_price = float(mp) if mp is not None else obter_menor_preco_v2(idsms[key], COUNTRY_ID)
+        limite = 0.10
+    elif key == 'wa1':
+        # WA servidor 1: escolher MAIOR preço <= 0.7 com qty>1
+        max_price = obter_preco_wa_desc_v2(idsms[key], COUNTRY_ID, max_usd=0.7)
+        limite = 0.70
     else:
         max_price = obter_menor_preco_v2(idsms[key], COUNTRY_ID)
-
-    # limite por serviço: outros até 0.20, demais até 0.10
-    limite = 0.20 if key == 'outros' else 0.10
+        # limite por serviço: outros até 0.20, demais até 0.10
+        limite = 0.20 if key == 'outros' else 0.10
 
     if (max_price is None) or (float(max_price) > limite):
         return bot.send_message(c.message.chat.id, '🚫 Sem números disponíveis.')

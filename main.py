@@ -219,6 +219,7 @@ SERVICE_PRICES = {
     'neon':     0.39,
 }
 
+# >>> rótulos sem abreviação e WhatsApp sem "Srv1"
 SERVICE_NAMES = {
     'mercado': 'Mercado Pago SMS',
     'mpsrv2':  'Mercado Pago SMS Servidor 2',
@@ -226,7 +227,7 @@ SERVICE_NAMES = {
     'china2':  'SMS para China 2',
     'picpay':  'PicPay SMS',
     'picsrv2': 'PicPay SMS Servidor 2',
-    'wa1':     'WhatsApp Servidor 1',
+    'wa1':     'WhatsApp',
     'wa2':     'WhatsApp Servidor 2',
     'outros':  'Outros SMS',
     'srv2':    'Outros SMS Servidor 2',
@@ -234,6 +235,23 @@ SERVICE_NAMES = {
     'nubank':  'Nubank SMS Servidor 2',
     'c6':      'C6 Bank SMS Servidor 2',
     'neon':    'Neon SMS Servidor 2',
+}
+
+# >>> NOVO: emojis editáveis no painel para os botões de compra
+SERVICE_EMOJIS = {
+    'mercado': '📲',
+    'mpsrv2':  '🛰️',
+    'china':   '🇨🇳',
+    'china2':  '🇨🇳',
+    'picpay':  '💸',
+    'picsrv2': '🛰️',
+    'wa1':     '💬',
+    'wa2':     '🛰️',
+    'outros':  '📡',
+    'srv2':    '🛰️',
+    'nubank':  '🏦',
+    'c6':      '🏦',
+    'neon':    '🏦',
 }
 
 # =========================================================
@@ -635,26 +653,27 @@ def callback_menu(c):
 def show_comprar_menu(chat_id):
     kb = telebot.types.InlineKeyboardMarkup(row_width=1)
 
-    def add_btn(label, key):
+    def add_btn(key):
         price = SERVICE_PRICES.get(key, 0.0)
-        kb.add(telebot.types.InlineKeyboardButton(f"{label} - R${price:.2f}", callback_data=f'comprar_{key}'))
+        label = f"{SERVICE_EMOJIS.get(key, '•')} {SERVICE_NAMES.get(key, key)} - R${price:.2f}"
+        kb.add(telebot.types.InlineKeyboardButton(label, callback_data=f'comprar_{key}'))
 
-    add_btn('📲 Mercado Pago SMS', 'mercado')
-    add_btn('🛰️ Mercado Pago SMS Servidor 2', 'mpsrv2')
-    add_btn('🇨🇳 SMS para China', 'china')
-    add_btn('🇨🇳 SMS para China 2', 'china2')
-    add_btn('💸 PicPay SMS', 'picpay')
-    add_btn('🛰️ PicPay SMS Servidor 2', 'picsrv2')
-    add_btn('💬 WhatsApp Srv1', 'wa1')
-    add_btn('🛰️ WhatsApp Srv2', 'wa2')
+    add_btn('mercado')
+    add_btn('mpsrv2')
+    add_btn('china')
+    add_btn('china2')
+    add_btn('picpay')
+    add_btn('picsrv2')
+    add_btn('wa1')   # WhatsApp
+    add_btn('wa2')   # WhatsApp Servidor 2
 
     # Novos (todos sms24h)
-    add_btn('🏦 Nubank (Srv2)', 'nubank')
-    add_btn('🏦 C6 Bank (Srv2)', 'c6')
-    add_btn('🏦 Neon (Srv2)', 'neon')
+    add_btn('nubank')
+    add_btn('c6')
+    add_btn('neon')
 
-    add_btn('📡 Outros SMS', 'outros')
-    add_btn('🛰️ Outros SMS Servidor 2', 'srv2')
+    add_btn('outros')
+    add_btn('srv2')  # Outros SMS Servidor 2
 
     bot.send_message(chat_id, 'Escolha serviço:', reply_markup=kb)
 
@@ -796,12 +815,8 @@ def cb_comprar(c):
     if balance < price:
         return bot.answer_callback_query(c.id, '❌ Saldo insuficiente.', True)
 
-    try:
-        bot.edit_message_text('⏳ Solicitando número...', c.message.chat.id, c.message.message_id)
-    except telebot.apihelper.ApiTelegramException as e:
-        if "message is not modified" not in str(e): raise
-    except Exception:
-        pass
+    # >>> Importante: NÃO editar a mensagem anterior (para não apagar a última)
+    # Em vez de editar, apenas seguimos com a compra e enviamos novas mensagens.
 
     # ============ fluxo especial: sms24h (Servidor 2) ============
     # keys que usam sms24h: srv2, mpsrv2, picsrv2, wa2, nubank, c6, neon
@@ -900,7 +915,7 @@ def cb_comprar(c):
         max_price = float(mp) if mp is not None else obter_menor_preco_v2(idsms[key], COUNTRY_ID)
         limite = 0.10
     elif key == 'wa1':
-        # WA servidor 1: escolher MAIOR preço <= 0.7 com qty>1
+        # WA (Servidor 1): escolher MAIOR preço <= 0.7 com qty>1
         max_price = obter_preco_wa_desc_v2(idsms[key], COUNTRY_ID, max_usd=0.7)
         limite = 0.70
     else:
@@ -1124,6 +1139,7 @@ def painel_admin():
 
     global SCANNER_ENABLED  # necessário para alterar no POST
     global SERVICE_PRICES
+    global SERVICE_EMOJIS
 
     msg_feedback = ""
     if request.method == 'POST':
@@ -1198,6 +1214,21 @@ def painel_admin():
             else:
                 msg_feedback = "Nenhum preço alterado."
 
+        # ===== NOVO: atualizar emojis dos botões =====
+        elif action == 'update_emojis':
+            changed = []
+            for key in SERVICE_EMOJIS.keys():
+                field = f"emoji_{key}"
+                if field in request.form:
+                    val_str = (request.form.get(field) or "").strip()
+                    if val_str:
+                        SERVICE_EMOJIS[key] = val_str
+                        changed.append(f"{SERVICE_NAMES.get(key, key)} → {val_str}")
+            if changed:
+                msg_feedback = "Emojis atualizados:\n" + "\n".join(changed)
+            else:
+                msg_feedback = "Nenhum emoji alterado."
+
     with get_db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT count(*) FROM numeros_sms")
@@ -1268,6 +1299,24 @@ def painel_admin():
         </form>
 
         <hr>
+        <h3>Emojis dos botões de compra</h3>
+        <form method="post">
+            <input type="hidden" name="action" value="update_emojis">
+            <table border="1" cellpadding="6" cellspacing="0">
+                <tr><th>Serviço</th><th>Emoji</th></tr>
+                {% for key, _ in items_sorted %}
+                <tr>
+                    <td>{{ service_names.get(key, key) }}</td>
+                    <td>
+                        <input name="emoji_{{key}}" type="text" value="{{ service_emojis.get(key, '') }}" maxlength="4" style="width:4em; text-align:center;">
+                    </td>
+                </tr>
+                {% endfor %}
+            </table>
+            <button type="submit" style="margin-top:10px;">Salvar Emojis</button>
+        </form>
+
+        <hr>
         <b style="white-space: pre-wrap;">{{msg_feedback}}</b>
         <hr>
         <h3>Estatísticas</h3>
@@ -1278,7 +1327,7 @@ def painel_admin():
         </ul>
     """, msg_feedback=msg_feedback, total=total, cancelados=cancelados, recebidos=recebidos,
        scanner_enabled=SCANNER_ENABLED, china2_code=china2_code,
-       items_sorted=items_sorted, service_names=SERVICE_NAMES)
+       items_sorted=items_sorted, service_names=SERVICE_NAMES, service_emojis=SERVICE_EMOJIS)
 
 # =========================================================
 # =================== HEALTH / WEBHOOKS ===================

@@ -201,6 +201,41 @@ PRAZO_SEGUNDOS   = PRAZO_MINUTOS * 60
 # ====== NOVO: controle do scanner (liga/desliga via painel) ======
 SCANNER_ENABLED = True   # padrão ligado
 
+# ====== NOVO: preços dinâmicos editáveis no painel ======
+SERVICE_PRICES = {
+    'mercado':  0.75,
+    'mpsrv2':   0.90,   # atualizado conforme pedido
+    'china':    0.60,
+    'china2':   0.60,
+    'picpay':   0.65,
+    'picsrv2':  0.70,
+    'wa1':      6.50,
+    'wa2':      7.00,
+    'outros':   1.10,
+    'srv2':     0.77,
+    # novos sms24h:
+    'nubank':   0.90,
+    'c6':       0.45,
+    'neon':     0.39,
+}
+
+SERVICE_NAMES = {
+    'mercado': 'Mercado Pago SMS',
+    'mpsrv2':  'Mercado Pago SMS Servidor 2',
+    'china':   'SMS para China',
+    'china2':  'SMS para China 2',
+    'picpay':  'PicPay SMS',
+    'picsrv2': 'PicPay SMS Servidor 2',
+    'wa1':     'WhatsApp Servidor 1',
+    'wa2':     'WhatsApp Servidor 2',
+    'outros':  'Outros SMS',
+    'srv2':    'Outros SMS Servidor 2',
+    # novos:
+    'nubank':  'Nubank SMS Servidor 2',
+    'c6':      'C6 Bank SMS Servidor 2',
+    'neon':    'Neon SMS Servidor 2',
+}
+
 # =========================================================
 # ======================== USUÁRIO =========================
 # =========================================================
@@ -599,18 +634,28 @@ def callback_menu(c):
 
 def show_comprar_menu(chat_id):
     kb = telebot.types.InlineKeyboardMarkup(row_width=1)
-    kb.add(
-        telebot.types.InlineKeyboardButton('📲 Mercado Pago SMS - R$0.75', callback_data='comprar_mercado'),
-        telebot.types.InlineKeyboardButton('🛰️ Mercado Pago SMS Servidor 2 - R$0.65', callback_data='comprar_mpsrv2'),
-        telebot.types.InlineKeyboardButton('🇨🇳 SMS para China   - R$0.60', callback_data='comprar_china'),
-        telebot.types.InlineKeyboardButton('🇨🇳 SMS para China 2 - R$0.60', callback_data='comprar_china2'),
-        telebot.types.InlineKeyboardButton('💸 PicPay SMS       - R$0.65', callback_data='comprar_picpay'),
-        telebot.types.InlineKeyboardButton('🛰️ PicPay SMS Servidor 2 - R$0.70', callback_data='comprar_picsrv2'),
-        telebot.types.InlineKeyboardButton('💬 WhatsApp Srv1 - R$6,50', callback_data='comprar_wa1'),
-        telebot.types.InlineKeyboardButton('🛰️ WhatsApp Srv2 - R$7,00', callback_data='comprar_wa2'),
-        telebot.types.InlineKeyboardButton('📡 Outros SMS        - R$1.10', callback_data='comprar_outros'),
-        telebot.types.InlineKeyboardButton('🛰️ Outros SMS Servidor 2    - R$0.77', callback_data='comprar_srv2'),
-    )
+
+    def add_btn(label, key):
+        price = SERVICE_PRICES.get(key, 0.0)
+        kb.add(telebot.types.InlineKeyboardButton(f"{label} - R${price:.2f}", callback_data=f'comprar_{key}'))
+
+    add_btn('📲 Mercado Pago SMS', 'mercado')
+    add_btn('🛰️ Mercado Pago SMS Servidor 2', 'mpsrv2')
+    add_btn('🇨🇳 SMS para China', 'china')
+    add_btn('🇨🇳 SMS para China 2', 'china2')
+    add_btn('💸 PicPay SMS', 'picpay')
+    add_btn('🛰️ PicPay SMS Servidor 2', 'picsrv2')
+    add_btn('💬 WhatsApp Srv1', 'wa1')
+    add_btn('🛰️ WhatsApp Srv2', 'wa2')
+
+    # Novos (todos sms24h)
+    add_btn('🏦 Nubank (Srv2)', 'nubank')
+    add_btn('🏦 C6 Bank (Srv2)', 'c6')
+    add_btn('🏦 Neon (Srv2)', 'neon')
+
+    add_btn('📡 Outros SMS', 'outros')
+    add_btn('🛰️ Outros SMS Servidor 2', 'srv2')
+
     bot.send_message(chat_id, 'Escolha serviço:', reply_markup=kb)
 
 @bot.message_handler(commands=['start'])
@@ -720,31 +765,10 @@ def cb_comprar(c):
     user_id, key = c.from_user.id, c.data.split('_')[1]
     criar_usuario(user_id)
 
-    # novos preços/nomes/ids
-    prices = {
-        'mercado':  0.75,
-        'mpsrv2':   0.65,   # Mercado Pago SMS Servidor 2 (sms24h)
-        'china':    0.60,
-        'china2':   0.60,
-        'picpay':   0.65,
-        'picsrv2':  0.70,   # PicPay SMS Servidor 2 (sms24h)
-        'wa1':      6.50,   # WhatsApp Servidor 1 (smsbower)
-        'wa2':      7.00,   # WhatsApp Servidor 2 (sms24h)
-        'outros':   1.10,
-        'srv2':     0.77    # Outros SMS Servidor 2 (sms24h)
-    }
-    names = {
-        'mercado': 'Mercado Pago SMS',
-        'mpsrv2':  'Mercado Pago SMS Servidor 2',
-        'china':   'SMS para China',
-        'china2':  'SMS para China 2',
-        'picpay':  'PicPay SMS',
-        'picsrv2': 'PicPay SMS Servidor 2',
-        'wa1':     'WhatsApp Servidor 1',
-        'wa2':     'WhatsApp Servidor 2',
-        'outros':  'Outros SMS',
-        'srv2':    'Outros SMS Servidor 2'
-    }
+    # usar preços globais editáveis
+    prices = SERVICE_PRICES
+    names  = SERVICE_NAMES
+
     idsms = {
         'mercado': get_service_code('mercado'),  # smsbower
         'mpsrv2':  'cq',                         # sms24h - Mercado
@@ -755,14 +779,18 @@ def cb_comprar(c):
         'wa1':     'wa',                         # smsbower - WhatsApp
         'wa2':     'wa',                         # sms24h  - WhatsApp
         'outros':  get_service_code('outros'),   # smsbower
-        'srv2':    'ot'                          # sms24h - Outros
+        'srv2':    'ot',                         # sms24h - Outros
+        # novos sms24h:
+        'nubank':  'aaa',
+        'c6':      'aff',
+        'neon':    'aex',
     }
 
     balance = carregar_usuario(user_id)['saldo']
     price   = prices.get(key)
     service = names.get(key)
 
-    if price is None:
+    if (price is None) or (service is None) or (key not in idsms):
         return bot.answer_callback_query(c.id, '❌ Opção inválida.', True)
 
     if balance < price:
@@ -776,8 +804,8 @@ def cb_comprar(c):
         pass
 
     # ============ fluxo especial: sms24h (Servidor 2) ============
-    # keys que usam sms24h: srv2, mpsrv2, picsrv2, wa2
-    if key in ('srv2', 'mpsrv2', 'picsrv2', 'wa2'):
+    # keys que usam sms24h: srv2, mpsrv2, picsrv2, wa2, nubank, c6, neon
+    if key in ('srv2', 'mpsrv2', 'picsrv2', 'wa2', 'nubank', 'c6', 'neon'):
         resp = solicitar_numero_sms24h(idsms[key], operator="tim", country=COUNTRY_ID)
         if resp.get('status') != 'success':
             return bot.send_message(c.message.chat.id, '🚫 Sem números disponíveis.')
@@ -789,14 +817,21 @@ def cb_comprar(c):
         if not ok:
             return bot.send_message(c.message.chat.id, "⚠️ Erro ao descontar saldo ou duplicidade, tente novamente.")
 
+        # teclados com "comprar mesmo serviço"
         kb_blocked = telebot.types.InlineKeyboardMarkup()
         kb_blocked.row(telebot.types.InlineKeyboardButton('❌ Cancelar (2m)', callback_data=f'cancel_blocked_{aid}'))
+        kb_blocked.row(
+            telebot.types.InlineKeyboardButton('🛒 Comprar mesmo serviço', callback_data=f'comprar_{key}')
+        )
         kb_blocked.row(
             telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
             telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu')
         )
         kb_unlocked = telebot.types.InlineKeyboardMarkup()
         kb_unlocked.row(telebot.types.InlineKeyboardButton('❌ Cancelar', callback_data=f'cancel_{aid}'))
+        kb_unlocked.row(
+            telebot.types.InlineKeyboardButton('🛒 Comprar mesmo serviço', callback_data=f'comprar_{key}')
+        )
         kb_unlocked.row(
             telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
             telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu')
@@ -815,6 +850,7 @@ def cb_comprar(c):
             'chat_id':    msg.chat.id,
             'message_id': msg.message_id,
             'service':    service,
+            'service_key': key,
             'full':       full,
             'short':      short,
             'provider':   'sms24h'
@@ -890,11 +926,17 @@ def cb_comprar(c):
     kb_blocked = telebot.types.InlineKeyboardMarkup()
     kb_blocked.row(telebot.types.InlineKeyboardButton('❌ Cancelar (2m)', callback_data=f'cancel_blocked_{aid}'))
     kb_blocked.row(
+        telebot.types.InlineKeyboardButton('🛒 Comprar mesmo serviço', callback_data=f'comprar_{key}')
+    )
+    kb_blocked.row(
         telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
         telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu')
     )
     kb_unlocked = telebot.types.InlineKeyboardMarkup()
     kb_unlocked.row(telebot.types.InlineKeyboardButton('❌ Cancelar', callback_data=f'cancel_{aid}'))
+    kb_unlocked.row(
+        telebot.types.InlineKeyboardButton('🛒 Comprar mesmo serviço', callback_data=f'comprar_{key}')
+    )
     kb_unlocked.row(
         telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
         telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu')
@@ -913,6 +955,7 @@ def cb_comprar(c):
         'chat_id':    msg.chat.id,
         'message_id': msg.message_id,
         'service':    service,
+        'service_key': key,
         'full':       full,
         'short':      short,
         'provider':   'smsbower'
@@ -968,6 +1011,7 @@ def spawn_sms_thread(aid):
     short    = info['short']
     chat_id  = info['chat_id']
     msg_id   = info.get('sms_message_id')
+    service_key = info.get('service_key', 'outros')
     info.setdefault('codes', [])
     info['canceled_by_user'] = False
 
@@ -1006,6 +1050,7 @@ def spawn_sms_thread(aid):
                 text += f"🕘 {rt}"
                 kb = telebot.types.InlineKeyboardMarkup()
                 kb.row(telebot.types.InlineKeyboardButton('📲 Receber outro SMS', callback_data=f'retry_{aid}'))
+                kb.row(telebot.types.InlineKeyboardButton('🛒 Comprar mesmo serviço', callback_data=f'comprar_{service_key}'))
                 kb.row(
                     telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
                     telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu')
@@ -1078,6 +1123,7 @@ def painel_admin():
         return "Acesso negado.", 401
 
     global SCANNER_ENABLED  # necessário para alterar no POST
+    global SERVICE_PRICES
 
     msg_feedback = ""
     if request.method == 'POST':
@@ -1133,6 +1179,25 @@ def painel_admin():
             else:
                 msg_feedback = "Informe um código de serviço válido (ex.: ki, ev, ...)."
 
+        # ===== NOVO: atualizar preços de todos os serviços =====
+        elif action == 'update_prices':
+            changed = []
+            for key in SERVICE_PRICES.keys():
+                field = f"price_{key}"
+                if field in request.form:
+                    val_str = (request.form.get(field) or "").strip()
+                    if val_str:
+                        try:
+                            new_val = float(val_str)
+                            SERVICE_PRICES[key] = new_val
+                            changed.append(f"{SERVICE_NAMES.get(key, key)} → R${new_val:.2f}")
+                        except:
+                            pass
+            if changed:
+                msg_feedback = "Preços atualizados:\n" + "\n".join(changed)
+            else:
+                msg_feedback = "Nenhum preço alterado."
+
     with get_db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT count(*) FROM numeros_sms")
@@ -1145,6 +1210,9 @@ def painel_admin():
     # status atual do scanner e código em uso para china2
     with SERVICE_CODE_LOCK:
         china2_code = GLOBAL_SERVICE_MAP.get('china2')
+
+    # ordenar serviços por nome para exibir no painel
+    items_sorted = sorted(SERVICE_PRICES.items(), key=lambda kv: SERVICE_NAMES.get(kv[0], kv[0]).lower())
 
     return render_template_string("""
         <h2>Painel Admin</h2>
@@ -1182,7 +1250,25 @@ def painel_admin():
         </form>
 
         <hr>
-        <b>{{msg_feedback}}</b>
+        <h3>Preços dos serviços</h3>
+        <form method="post">
+            <input type="hidden" name="action" value="update_prices">
+            <table border="1" cellpadding="6" cellspacing="0">
+                <tr><th>Serviço</th><th>Preço (R$)</th></tr>
+                {% for key, val in items_sorted %}
+                <tr>
+                    <td>{{ service_names.get(key, key) }}</td>
+                    <td>
+                        <input name="price_{{key}}" type="number" step="0.01" value="{{ '%.2f'|format(val) }}">
+                    </td>
+                </tr>
+                {% endfor %}
+            </table>
+            <button type="submit" style="margin-top:10px;">Salvar Preços</button>
+        </form>
+
+        <hr>
+        <b style="white-space: pre-wrap;">{{msg_feedback}}</b>
         <hr>
         <h3>Estatísticas</h3>
         <ul>
@@ -1191,7 +1277,8 @@ def painel_admin():
             <li>Números que receberam SMS: {{recebidos}}</li>
         </ul>
     """, msg_feedback=msg_feedback, total=total, cancelados=cancelados, recebidos=recebidos,
-       scanner_enabled=SCANNER_ENABLED, china2_code=china2_code)
+       scanner_enabled=SCANNER_ENABLED, china2_code=china2_code,
+       items_sorted=items_sorted, service_names=SERVICE_NAMES)
 
 # =========================================================
 # =================== HEALTH / WEBHOOKS ===================

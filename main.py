@@ -32,6 +32,10 @@ DATABASE_URL      = os.getenv("DATABASE_URL")
 PAINEL_TOKEN      = os.getenv("PAINEL_TOKEN") or "painel2024"
 SERVICES_JSON     = os.getenv("SERVICES_JSON") or "services.json"  # caminho do JSON que você já tem
 
+# >>> NOVO: canal público/privado para histórico de recargas
+# se o canal for privado, defina HIST_CHANNEL como o ID numérico (-100xxxxxxxxxx)
+HIST_CHANNEL      = os.getenv("HIST_CHANNEL", "@historico_recarregas")
+
 # >>> API sms24h (Servidor 2)
 SMS24H_URL        = "https://api.sms24h.org/stubs/handler_api"
 API_KEY_SMS24H    = os.getenv("API_KEY_SMS24H")  # defina no ambiente
@@ -177,7 +181,7 @@ def set_china2_service_code(new_code, reason="", price=None):
             with SCANNER_PRICE_LOCK:
                 global SCANNER_LAST_PRICE
                 SCANNER_LAST_PRICE = p
-    logger.info(f"[SCANNER] China2: {old} → {new_code} {('['+reason+']') if reason else ''}")
+    logger.info(f"[SCANNER] China 2: {old} → {new_code} {('['+reason+']') if reason else ''}")
     try:
         if alert_bot and ALERT_CHAT_ID:
             alert_bot.send_message(
@@ -1391,11 +1395,25 @@ def mp_webhook():
                             conn.commit()
                         exportar_backup_json()
                         bot.send_message(uid, f"✅ Recarga de R$ {amt:.2f} confirmada! Seu novo saldo é R$ {current + amt:.2f}")
-                        enviar_mensagem_bot(
-                            admin_bot,
-                            ADMIN_CHAT_ID,
-                            f"💰 Novo DEPÓSITO\nUser: {uid}\nValor: R$ {amt:.2f}\nData: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}{ref_text}"
+
+                        # ---------- AQUI É A MUDANÇA ----------
+                        # Monta a mesma mensagem e envia para ADMIN e para o CANAL
+                        msg_dep = (
+                            f"💰 Novo DEPÓSITO\n"
+                            f"User: {uid}\n"
+                            f"Valor: R$ {amt:.2f}\n"
+                            f"Data: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}{ref_text}"
                         )
+
+                        # Admin (como já fazia)
+                        enviar_mensagem_bot(admin_bot, ADMIN_CHAT_ID, msg_dep)
+                        # Canal de histórico (NOVO) - requer admin do canal
+                        try:
+                            enviar_mensagem_bot(admin_bot, HIST_CHANNEL, msg_dep)
+                        except Exception as e:
+                            logger.error(f"Falha ao publicar no canal de histórico: {e}")
+                        # ---------- FIM DA MUDANÇA ----------
+
         except Exception as e:
             logger.error(f"[MP] Erro webhook: {e}")
     return '', 200

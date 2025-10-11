@@ -210,7 +210,7 @@ SERVICE_PRICES = {
     'mercado':  0.75,
     'mpsrv2':   0.90,   # atualizado conforme pedido
     'china':    0.60,
-    'china2':   0.60,
+    'china2':  0.60,
     'picpay':   0.65,
     'picsrv2':  0.70,
     'wa1':      6.50,
@@ -221,6 +221,8 @@ SERVICE_PRICES = {
     'nubank':   0.90,
     'c6':       0.45,
     'neon':     0.39,
+    # >>> NOVO: C6 via SMSBower (Srv1) com preço R$ 0,64
+    'c6srv1':   0.64,
 }
 
 # >>> rótulos sem abreviação e WhatsApp sem "Srv1"
@@ -239,6 +241,8 @@ SERVICE_NAMES = {
     'nubank':  'Nubank SMS Servidor 2',
     'c6':      'C6 Bank SMS Servidor 2',
     'neon':    'Neon SMS Servidor 2',
+    # >>> NOVO: label do C6 (Srv1 / SMSBower)
+    'c6srv1':  'C6 Bank SMS',
 }
 
 # >>> NOVO: emojis editáveis no painel para os botões de compra
@@ -256,6 +260,8 @@ SERVICE_EMOJIS = {
     'nubank':  '🏦',
     'c6':      '🏦',
     'neon':    '🏦',
+    # >>> NOVO: emoji para C6 (Srv1)
+    'c6srv1':  '🏦',
 }
 
 # =========================================================
@@ -671,8 +677,9 @@ def show_comprar_menu(chat_id):
     add_btn('wa1')   # WhatsApp
     add_btn('wa2')   # WhatsApp Servidor 2
 
-    # Novos (todos sms24h)
+    # Novos (todos sms24h) + NOVO C6 (Srv1 via SMSBower) ACIMA do C6 Srv2
     add_btn('nubank')
+    add_btn('c6srv1')  # <<<<< NOVO botão acima do C6 Srv2
     add_btn('c6')
     add_btn('neon')
 
@@ -807,6 +814,8 @@ def cb_comprar(c):
         'nubank':  'aaa',
         'c6':      'aff',
         'neon':    'aex',
+        # >>> NOVO: C6 via SMSBower usa o MESMO id do 'outros' (SMSBower)
+        'c6srv1':  get_service_code('outros'),
     }
 
     balance = carregar_usuario(user_id)['saldo']
@@ -818,9 +827,6 @@ def cb_comprar(c):
 
     if balance < price:
         return bot.answer_callback_query(c.id, '❌ Saldo insuficiente.', True)
-
-    # >>> Importante: NÃO editar a mensagem anterior (para não apagar a última)
-    # Em vez de editar, apenas seguimos com a compra e enviamos novas mensagens.
 
     # ============ fluxo especial: sms24h (Servidor 2) ============
     # keys que usam sms24h: srv2, mpsrv2, picsrv2, wa2, nubank, c6, neon
@@ -913,7 +919,11 @@ def cb_comprar(c):
 
     # ================== fluxo normal (smsbower) ==================
     # determinar max_price
-    if key == 'china2':
+    if key == 'c6srv1':
+        # >>> NOVO: C6 via SMSBower com teto de compra 0.8 USD
+        max_price = 0.80
+        limite = 0.80
+    elif key == 'china2':
         with SCANNER_PRICE_LOCK:
             mp = SCANNER_LAST_PRICE
         max_price = float(mp) if mp is not None else obter_menor_preco_v2(idsms[key], COUNTRY_ID)

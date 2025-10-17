@@ -33,7 +33,6 @@ PAINEL_TOKEN      = os.getenv("PAINEL_TOKEN") or "painel2024"
 SERVICES_JSON     = os.getenv("SERVICES_JSON") or "services.json"  # caminho do JSON que você já tem
 
 # >>> NOVO: canal público/privado para histórico de recargas
-# se o canal for privado, defina HIST_CHANNEL como o ID numérico (-100xxxxxxxxxx)
 HIST_CHANNEL      = os.getenv("HIST_CHANNEL", "@historico_recarregas")
 
 # >>> API sms24h (Servidor 2)
@@ -95,7 +94,7 @@ def criar_tabela_payments():
         """)
         conn.commit()
 
-# >>> NOVO: tabela para persistir configurações (preços, emojis, caps)
+# >>> tabela para persistir configurações (preços, emojis, caps)
 def criar_tabela_config():
     with get_db_conn() as conn, conn.cursor() as cur:
         cur.execute("""
@@ -130,7 +129,6 @@ handler = TelegramLogHandler()
 handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
 logger.addHandler(handler)
 
-# Helper para logs administrativos (saldo novo, compra/cancelamento)
 def log_admin(msg: str):
     try:
         if alert_bot and ALERT_CHAT_ID:
@@ -142,7 +140,7 @@ def log_admin(msg: str):
 # ======= SERVICES JSON + MAPA DE SERVIÇOS DINÂMICO =======
 # =========================================================
 services_index_lock = threading.Lock()
-services_index = {}  # { "service_id_str": {"title":..., "activate_org_code":...} }
+services_index = {}
 
 def load_services_index(path=SERVICES_JSON):
     global services_index
@@ -176,7 +174,7 @@ def get_service_code(key):
     with SERVICE_CODE_LOCK:
         return GLOBAL_SERVICE_MAP.get(key)
 
-# >>> preço atual escolhido pelo scanner p/ china2
+# preço atual china2
 SCANNER_LAST_PRICE = None
 SCANNER_PRICE_LOCK = threading.Lock()
 
@@ -214,10 +212,9 @@ PENDING_RECHARGE = {}
 PRAZO_MINUTOS    = 23
 PRAZO_SEGUNDOS   = PRAZO_MINUTOS * 60
 
-# ====== NOVO: controle do scanner (liga/desliga via painel) ======
-SCANNER_ENABLED = True   # padrão ligado
+SCANNER_ENABLED = True
 
-# ====== NOVO: preços dinâmicos editáveis no painel ======
+# ====== preços dinâmicos editáveis ======
 SERVICE_PRICES = {
     'mercado':  0.75,
     'mpsrv2':   0.90,
@@ -233,14 +230,16 @@ SERVICE_PRICES = {
     'nubank':   0.90,
     'c6':       0.45,
     'neon':     0.39,
-    # Servidor 1 / SMSBower:
+    # Servidor 1:
     'c6srv1':   0.64,
     'google':   0.90,
-    # Servidor 2 / sms24h:
+    # Servidor 2:
     'googlesrv2': 0.90,
+    # >>> NOVO: PicPay Servidor Melhor (SMSBower / provider 3018)
+    'picpaybest': 0.90,
 }
 
-# >>> rótulos
+# rótulos
 SERVICE_NAMES = {
     'mercado': 'Mercado Pago SMS',
     'mpsrv2':  'Mercado Pago SMS Servidor 2',
@@ -252,18 +251,17 @@ SERVICE_NAMES = {
     'wa2':     'WhatsApp Servidor 2',
     'outros':  'Outros SMS',
     'srv2':    'Outros SMS Servidor 2',
-    # sms24h:
     'nubank':  'Nubank SMS Servidor 2',
     'c6':      'C6 Bank SMS Servidor 2',
     'neon':    'Neon SMS Servidor 2',
-    # Servidor 1:
     'c6srv1':  'C6 Bank SMS',
     'google':  'Google SMS',
-    # Servidor 2:
     'googlesrv2': 'Google SMS Servidor 2',
+    # >>> NOVO
+    'picpaybest': 'PicPay Servidor Melhor',
 }
 
-# >>> emojis
+# emojis
 SERVICE_EMOJIS = {
     'mercado': '📲',
     'mpsrv2':  '🛰️',
@@ -281,21 +279,24 @@ SERVICE_EMOJIS = {
     'c6srv1':  '🏦',
     'google':  '🔍',
     'googlesrv2': '🔍',
+    # >>> NOVO
+    'picpaybest': '💸',
 }
 
-# >>> CAP global editável para maxPrice no SMSBower
+# CAP global maxPrice para SMSBower (pode ser alterado no painel)
 SMSBOWER_MAX_PRICE_CAP = 0.1754  # USD
 
-# >>> NOVO: CAPs por serviço (Servidor 1 / SMSBower) - EDITÁVEIS NO PAINEL
+# CAPs por serviço (Servidor 1 / SMSBower) - editáveis e persistidos
 DEFAULT_S1_CAPS = {
-    'mercado': 0.10,
-    'china':   0.10,
-    'china2':  0.10,
-    'picpay':  0.10,
-    'wa1':     0.70,  # WA segue regra especial, mas limitado por este cap
-    'outros':  0.20,
-    'c6srv1':  0.08,  # solicitado
-    'google':  0.11,  # solicitado
+    'mercado':    0.10,
+    'china':      0.10,
+    'china2':     0.10,
+    'picpay':     0.10,
+    'wa1':        0.70,
+    'outros':     0.20,
+    'c6srv1':     0.08,  # ajuste solicitado
+    'google':     0.11,  # ajuste solicitado
+    'picpaybest': 0.08,  # >>> NOVO (MAX_PRICE = 0.08)
 }
 S1_CAPS = DEFAULT_S1_CAPS.copy()
 
@@ -359,7 +360,6 @@ def load_smsg_cap_from_db():
     except Exception as e:
         logger.error(f"[config] erro ao carregar cap do SMSBower: {e}")
 
-# >>> NOVO: persistir/ler caps por serviço (Servidor 1)
 def save_s1_caps_to_db():
     try:
         with get_db_conn() as conn, conn.cursor() as cur:
@@ -488,7 +488,6 @@ def comprar_numero_atomico(uid, aid, price):
             conn.commit()
     exportar_backup_json()
     logger.info(f"Saldo de {uid} atualizado. Nº {aid} associado.")
-    # >>> LOG ADMIN: compra com saldo novo
     log_admin(f"🧾 *COMPRA*\nUser: `{uid}`\nAID: `{aid}`\nPreço: R$ {price:.2f}\nNovo saldo: R$ {saldo:.2f}")
     return True
 
@@ -503,14 +502,12 @@ def marcar_cancelado_e_devolver(uid, aid):
             price = row['price']
             cur.execute("UPDATE numeros_sms SET cancelado=TRUE WHERE aid=%s", (aid,))
             cur.execute("UPDATE usuarios SET saldo=saldo+%s WHERE id=%s", (price, str(uid)))
-            # pegar saldo atualizado
             cur.execute("SELECT saldo FROM usuarios WHERE id=%s", (str(uid),))
             res = cur.fetchone()
             if res:
                 novo_saldo = float(res['saldo'])
             conn.commit()
     exportar_backup_json()
-    # >>> LOG ADMIN: cancelamento/reembolso com saldo novo
     if novo_saldo is not None:
         log_admin(f"↩️ *CANCELAMENTO / REEMBOLSO*\nUser: `{uid}`\nAID: `{aid}`\nValor devolvido: R$ {price:.2f}\nNovo saldo: R$ {novo_saldo:.2f}")
     return True
@@ -543,7 +540,8 @@ def enviar_documento_bot(bot_instance, chat_id, file_path, tentativas=3):
             time.sleep(1)
     return False
 
-def solicitar_numero_smsbower(servico, max_price=None):
+# >>> ALTERADO: aceitar provider_ids opcional
+def solicitar_numero_smsbower(servico, max_price=None, provider_ids=None):
     params = {
         'api_key': API_KEY_SMSBOWER,
         'action': 'getNumber',
@@ -552,6 +550,8 @@ def solicitar_numero_smsbower(servico, max_price=None):
     }
     if max_price is not None:
         params['maxPrice'] = f"{max_price:.4f}"
+    if provider_ids:
+        params['providerIds'] = provider_ids
     try:
         r = requests.get(SMSBOWER_URL, params=params, timeout=15)
         r.raise_for_status()
@@ -639,9 +639,6 @@ def obter_status_sms24h(aid):
         return None
 
 def set_status_sms24h(aid, status):
-    """
-    status: 1 (SMS enviado), 3 (repetir SMS), 6 (finalizar), 8 (cancelar)
-    """
     if not sms24h_key_ok():
         return None
     try:
@@ -658,19 +655,7 @@ def set_status_sms24h(aid, status):
         logger.error(f"Erro setStatus sms24h: {e}")
         return None
 
-# >>> dispatcher de status por provider
-def obter_status(aid, provider):
-    if provider == 'sms24h':
-        return obter_status_sms24h(aid)
-    return obter_status_smsbower(aid)
-
-def cancelar_numero(aid, provider):
-    if provider == 'sms24h':
-        set_status_sms24h(aid, 8)  # cancelar
-        return
-    cancelar_numero_smsbower(aid)
-
-# ========= menor preço via getPricesV2 (smsbower) =========
+# ========= menor preço via getPricesV2 (qty > 3) =========
 def obter_menor_preco_v2(service_code, country_id):
     try:
         r = requests.get(
@@ -704,16 +689,16 @@ def obter_menor_preco_v2(service_code, country_id):
             q = int(qty)
         except:
             q = 0
-        if q > 0:
+        # >>> só aceitar se qty > 3
+        if q > 3:
             candidatos.append(p)
 
     if not candidatos:
         return None
-
     candidatos.sort()
     return candidatos[0]
 
-# ========= preço WA especial: decrescente até <= cap com qty>1 =========
+# ========= WA: decrescente até <= cap com qty > 3 =========
 def obter_preco_wa_desc_v2(service_code, country_id, max_usd=0.7):
     try:
         r = requests.get(
@@ -747,7 +732,7 @@ def obter_preco_wa_desc_v2(service_code, country_id, max_usd=0.7):
             q = int(qty)
         except:
             q = 0
-        if p <= max_usd and q > 1:
+        if p <= max_usd and q > 3:  # >>> qty > 3
             candidatos.append((p, q))
 
     if not candidatos:
@@ -755,7 +740,7 @@ def obter_preco_wa_desc_v2(service_code, country_id, max_usd=0.7):
 
     candidatos.sort(key=lambda x: x[0], reverse=True)
     escolhido = candidatos[0][0]
-    logger.info(f"[WA] preço escolhido (<= {max_usd} c/ qty>1): {escolhido}")
+    logger.info(f"[WA] preço escolhido (<= {max_usd} c/ qty>3): {escolhido}")
     return escolhido
 
 # =========================================================
@@ -791,8 +776,12 @@ def show_comprar_menu(chat_id):
     add_btn('mpsrv2')
     add_btn('china')
     add_btn('china2')
+
+    # PicPay: normal, servidor 2 e NOVO servidor melhor
     add_btn('picpay')
     add_btn('picsrv2')
+    add_btn('picpaybest')  # >>> NOVO
+
     add_btn('wa1')
     add_btn('wa2')
 
@@ -800,7 +789,7 @@ def show_comprar_menu(chat_id):
     add_btn('google')
     add_btn('googlesrv2')
 
-    # Novos (todos sms24h) + C6 (Srv1 via SMSBower) ACIMA do C6 Srv2
+    # Novos (todos sms24h) + C6 (Srv1) acima do C6 Srv2
     add_btn('nubank')
     add_btn('c6srv1')
     add_btn('c6')
@@ -923,15 +912,15 @@ def cb_comprar(c):
 
     idsms = {
         'mercado': get_service_code('mercado'),  # smsbower
-        'mpsrv2':  'cq',                         # sms24h - Mercado
+        'mpsrv2':  'cq',                         # sms24h
         'china':   get_service_code('china'),    # smsbower
         'china2':  get_service_code('china2'),   # smsbower
         'picpay':  get_service_code('picpay'),   # smsbower
         'picsrv2': 'ev',                         # sms24h - PicPay
-        'wa1':     'wa',                         # smsbower - WhatsApp
-        'wa2':     'wa',                         # sms24h  - WhatsApp
+        'wa1':     'wa',                         # smsbower
+        'wa2':     'wa',                         # sms24h
         'outros':  get_service_code('outros'),   # smsbower
-        'srv2':    'ot',                         # sms24h - Outros
+        'srv2':    'ot',                         # sms24h
         # sms24h:
         'nubank':  'aaa',
         'c6':      'aff',
@@ -941,6 +930,8 @@ def cb_comprar(c):
         'google':  'go',
         # Servidor 2:
         'googlesrv2': 'go',
+        # >>> NOVO: PicPay Servidor Melhor (SMSBower)
+        'picpaybest': 'ev',
     }
 
     balance = carregar_usuario(user_id)['saldo']
@@ -1036,7 +1027,7 @@ def cb_comprar(c):
     # ================== fluxo smsbower (Servidor 1) ==================
     s1_effective_cap = min(float(SMSBOWER_MAX_PRICE_CAP), float(S1_CAPS.get(key, 0.10)))
 
-    # Descobrir o "menor" preço (ou regra especial do WA)
+    # Descobrir o melhor preço disponível (qty > 3)
     if key == 'wa1':
         base_max_price = obter_preco_wa_desc_v2(idsms[key], COUNTRY_ID, max_usd=s1_effective_cap)
     elif key == 'china2':
@@ -1049,8 +1040,11 @@ def cb_comprar(c):
     if (base_max_price is None) or (float(base_max_price) > s1_effective_cap):
         return bot.send_message(c.message.chat.id, '🚫 Sem números disponíveis.')
 
-    # Forçar compra no preço mínimo encontrado (para realmente “comprar o menor”)
-    resp = solicitar_numero_smsbower(idsms[key], max_price=float(base_max_price))
+    # >>> providerIds somente para 'picpaybest'
+    provider_ids = "3018" if key == 'picpaybest' else None
+
+    # Compra com max_price no menor encontrado (garantir compra do menor)
+    resp = solicitar_numero_smsbower(idsms[key], max_price=float(base_max_price), provider_ids=provider_ids)
     if resp.get('status') != 'success':
         return bot.send_message(c.message.chat.id, '🚫 Sem números disponíveis.')
 
@@ -1353,7 +1347,6 @@ def painel_admin():
             except:
                 msg_feedback = "Valor inválido para CAP global do SMSBower."
 
-        # >>> NOVO: atualizar caps por serviço (Servidor 1)
         elif action == 'update_s1_caps':
             changed = []
             for key in DEFAULT_S1_CAPS.keys():
@@ -1508,6 +1501,7 @@ def painel_admin():
            ('outros', SERVICE_NAMES['outros']),
            ('c6srv1', SERVICE_NAMES['c6srv1']),
            ('google', SERVICE_NAMES['google']),
+           ('picpaybest', SERVICE_NAMES['picpaybest']),
        ])
 
 # =========================================================
@@ -1592,11 +1586,11 @@ def mp_webhook():
 # =========================================================
 # ================= SCANNER 20m (China 2) =================
 # =========================================================
-SCANNER_INTERVAL_SEC = 20 * 60  # 20 minutos
+SCANNER_INTERVAL_SEC = 20 * 60
 SCANNER_MIN_PRICE = 0.001
 SCANNER_MAX_PRICE = 0.100
 SCANNER_MIN_COUNT = 50
-SCANNER_COUNTRY_ID = "14"  # Brazil na resposta do getPricesByService
+SCANNER_COUNTRY_ID = "14"
 
 def scanner_loop():
     while True:
@@ -1623,7 +1617,7 @@ def scanner_loop():
                 if not svc:
                     continue
                 countries = (svc.get("countries") or {})
-                br = countries.get(SCANNER_COUNTRY_ID)  # "14"
+                br = countries.get(SCANNER_COUNTRY_ID)
                 if not br:
                     continue
                 min_price = br.get("min_price")

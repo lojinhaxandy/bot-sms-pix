@@ -95,9 +95,21 @@ def criar_tabela_payments():
         """)
         conn.commit()
 
+# >>> NOVO: tabela para persistir configurações (preços, emojis, caps)
+def criar_tabela_config():
+    with get_db_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS app_config (
+                key TEXT PRIMARY KEY,
+                value JSONB NOT NULL
+            )
+        """)
+        conn.commit()
+
 criar_tabela_usuarios()
 criar_tabela_numeros_sms()
 criar_tabela_payments()
+criar_tabela_config()
 
 # =========================================================
 # =================== LOG EM TELEGRAM =====================
@@ -208,24 +220,27 @@ SCANNER_ENABLED = True   # padrão ligado
 # ====== NOVO: preços dinâmicos editáveis no painel ======
 SERVICE_PRICES = {
     'mercado':  0.75,
-    'mpsrv2':   0.90,   # atualizado conforme pedido
+    'mpsrv2':   0.90,
     'china':    0.60,
-    'china2':  0.60,
+    'china2':   0.60,
     'picpay':   0.65,
     'picsrv2':  0.70,
     'wa1':      6.50,
     'wa2':      7.00,
     'outros':   1.10,
     'srv2':     0.77,
-    # novos sms24h:
+    # sms24h:
     'nubank':   0.90,
     'c6':       0.45,
     'neon':     0.39,
-    # >>> NOVO: C6 via SMSBower (Srv1) com preço R$ 0,64
+    # Servidor 1 / SMSBower:
     'c6srv1':   0.64,
+    'google':   0.90,
+    # Servidor 2 / sms24h:
+    'googlesrv2': 0.90,
 }
 
-# >>> rótulos sem abreviação e WhatsApp sem "Srv1"
+# >>> rótulos
 SERVICE_NAMES = {
     'mercado': 'Mercado Pago SMS',
     'mpsrv2':  'Mercado Pago SMS Servidor 2',
@@ -237,15 +252,18 @@ SERVICE_NAMES = {
     'wa2':     'WhatsApp Servidor 2',
     'outros':  'Outros SMS',
     'srv2':    'Outros SMS Servidor 2',
-    # novos:
+    # sms24h:
     'nubank':  'Nubank SMS Servidor 2',
     'c6':      'C6 Bank SMS Servidor 2',
     'neon':    'Neon SMS Servidor 2',
-    # >>> NOVO: label do C6 (Srv1 / SMSBower)
+    # Servidor 1:
     'c6srv1':  'C6 Bank SMS',
+    'google':  'Google SMS',
+    # Servidor 2:
+    'googlesrv2': 'Google SMS Servidor 2',
 }
 
-# >>> NOVO: emojis editáveis no painel para os botões de compra
+# >>> emojis
 SERVICE_EMOJIS = {
     'mercado': '📲',
     'mpsrv2':  '🛰️',
@@ -260,9 +278,116 @@ SERVICE_EMOJIS = {
     'nubank':  '🏦',
     'c6':      '🏦',
     'neon':    '🏦',
-    # >>> NOVO: emoji para C6 (Srv1)
     'c6srv1':  '🏦',
+    'google':  '🔍',
+    'googlesrv2': '🔍',
 }
+
+# >>> CAP global editável para maxPrice no SMSBower
+SMSBOWER_MAX_PRICE_CAP = 0.1754  # USD
+
+# >>> NOVO: CAPs por serviço (Servidor 1 / SMSBower) - EDITÁVEIS NO PAINEL
+DEFAULT_S1_CAPS = {
+    'mercado': 0.10,
+    'china':   0.10,
+    'china2':  0.10,
+    'picpay':  0.10,
+    'wa1':     0.70,  # WA segue regra especial, mas limitado por este cap
+    'outros':  0.20,
+    'c6srv1':  0.08,  # solicitado
+    'google':  0.11,  # solicitado
+}
+S1_CAPS = DEFAULT_S1_CAPS.copy()
+
+# ---------- Persistência de preços, emojis, caps ----------
+def save_prices_emojis_to_db():
+    try:
+        with get_db_conn() as conn, conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO app_config (key, value) VALUES ('service_prices', %s)
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+            """, (json.dumps(SERVICE_PRICES),))
+            cur.execute("""
+                INSERT INTO app_config (key, value) VALUES ('service_emojis', %s)
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+            """, (json.dumps(SERVICE_EMOJIS),))
+            conn.commit()
+    except Exception as e:
+        logger.error(f"[config] erro ao salvar preços/emojis: {e}")
+
+def load_prices_emojis_from_db():
+    global SERVICE_PRICES, SERVICE_EMOJIS
+    try:
+        with get_db_conn() as conn, conn.cursor() as cur:
+            cur.execute("SELECT key, value FROM app_config WHERE key IN ('service_prices','service_emojis')")
+            rows = cur.fetchall()
+        store = {r['key']: r['value'] for r in rows}
+        if 'service_prices' in store and isinstance(store['service_prices'], dict):
+            SERVICE_PRICES.update(store['service_prices'])
+        else:
+            save_prices_emojis_to_db()
+        if 'service_emojis' in store and isinstance(store['service_emojis'], dict):
+            SERVICE_EMOJIS.update(store['service_emojis'])
+        else:
+            save_prices_emojis_to_db()
+    except Exception as e:
+        logger.error(f"[config] erro ao carregar preços/emojis: {e}")
+
+def save_smsg_cap_to_db():
+    try:
+        with get_db_conn() as conn, conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO app_config (key, value) VALUES ('smsbower_max_price_cap', %s)
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+            """, (json.dumps(SMSBOWER_MAX_PRICE_CAP),))
+            conn.commit()
+    except Exception as e:
+        logger.error(f"[config] erro ao salvar cap do SMSBower: {e}")
+
+def load_smsg_cap_from_db():
+    global SMSBOWER_MAX_PRICE_CAP
+    try:
+        with get_db_conn() as conn, conn.cursor() as cur:
+            cur.execute("SELECT value FROM app_config WHERE key='smsbower_max_price_cap'")
+            row = cur.fetchone()
+        if row is not None:
+            val = row['value']
+            try:
+                SMSBOWER_MAX_PRICE_CAP = float(val if not isinstance(val, dict) else val.get('cap', SMSBOWER_MAX_PRICE_CAP))
+            except:
+                pass
+    except Exception as e:
+        logger.error(f"[config] erro ao carregar cap do SMSBower: {e}")
+
+# >>> NOVO: persistir/ler caps por serviço (Servidor 1)
+def save_s1_caps_to_db():
+    try:
+        with get_db_conn() as conn, conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO app_config (key, value) VALUES ('smsbower_service_caps', %s)
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+            """, (json.dumps(S1_CAPS),))
+            conn.commit()
+    except Exception as e:
+        logger.error(f"[config] erro ao salvar caps por serviço: {e}")
+
+def load_s1_caps_from_db():
+    global S1_CAPS
+    try:
+        with get_db_conn() as conn, conn.cursor() as cur:
+            cur.execute("SELECT value FROM app_config WHERE key='smsbower_service_caps'")
+            row = cur.fetchone()
+        if row and isinstance(row['value'], dict):
+            S1_CAPS.update(row['value'])
+        else:
+            save_s1_caps_to_db()
+    except Exception as e:
+        logger.error(f"[config] erro ao carregar caps por serviço: {e}")
+
+# carregar persistidos
+load_prices_emojis_from_db()
+load_smsg_cap_from_db()
+load_s1_caps_from_db()
 
 # =========================================================
 # ======================== USUÁRIO =========================
@@ -588,12 +713,8 @@ def obter_menor_preco_v2(service_code, country_id):
     candidatos.sort()
     return candidatos[0]
 
-# ========= preço WA especial: decrescente até <= 0.7 com qty>1 =========
+# ========= preço WA especial: decrescente até <= cap com qty>1 =========
 def obter_preco_wa_desc_v2(service_code, country_id, max_usd=0.7):
-    """
-    Lê getPricesV2 e retorna o MAIOR preço <= max_usd cuja quantidade > 1.
-    Se não encontrar, retorna None.
-    """
     try:
         r = requests.get(
             SMSBOWER_URL,
@@ -616,7 +737,6 @@ def obter_preco_wa_desc_v2(service_code, country_id, max_usd=0.7):
     if not isinstance(svc_map, dict) or not svc_map:
         return None
 
-    # construir lista (preco, qty) e filtrar <= max_usd com qty>1
     candidatos = []
     for price_str, qty in svc_map.items():
         try:
@@ -633,10 +753,9 @@ def obter_preco_wa_desc_v2(service_code, country_id, max_usd=0.7):
     if not candidatos:
         return None
 
-    # ordenar do MAIOR para o MENOR e pegar o primeiro
     candidatos.sort(key=lambda x: x[0], reverse=True)
     escolhido = candidatos[0][0]
-    logger.info(f"[WA] preço escolhido (desc <= {max_usd} c/ qty>1): {escolhido}")
+    logger.info(f"[WA] preço escolhido (<= {max_usd} c/ qty>1): {escolhido}")
     return escolhido
 
 # =========================================================
@@ -674,17 +793,21 @@ def show_comprar_menu(chat_id):
     add_btn('china2')
     add_btn('picpay')
     add_btn('picsrv2')
-    add_btn('wa1')   # WhatsApp
-    add_btn('wa2')   # WhatsApp Servidor 2
+    add_btn('wa1')
+    add_btn('wa2')
 
-    # Novos (todos sms24h) + NOVO C6 (Srv1 via SMSBower) ACIMA do C6 Srv2
+    # Google
+    add_btn('google')
+    add_btn('googlesrv2')
+
+    # Novos (todos sms24h) + C6 (Srv1 via SMSBower) ACIMA do C6 Srv2
     add_btn('nubank')
-    add_btn('c6srv1')  # <<<<< NOVO botão acima do C6 Srv2
+    add_btn('c6srv1')
     add_btn('c6')
     add_btn('neon')
 
     add_btn('outros')
-    add_btn('srv2')  # Outros SMS Servidor 2
+    add_btn('srv2')
 
     bot.send_message(chat_id, 'Escolha serviço:', reply_markup=kb)
 
@@ -795,7 +918,6 @@ def cb_comprar(c):
     user_id, key = c.from_user.id, c.data.split('_')[1]
     criar_usuario(user_id)
 
-    # usar preços globais editáveis
     prices = SERVICE_PRICES
     names  = SERVICE_NAMES
 
@@ -810,12 +932,15 @@ def cb_comprar(c):
         'wa2':     'wa',                         # sms24h  - WhatsApp
         'outros':  get_service_code('outros'),   # smsbower
         'srv2':    'ot',                         # sms24h - Outros
-        # novos sms24h:
+        # sms24h:
         'nubank':  'aaa',
         'c6':      'aff',
         'neon':    'aex',
-        # >>> NOVO: C6 via SMSBower usa o MESMO id do 'outros' (SMSBower)
+        # Servidor 1:
         'c6srv1':  get_service_code('outros'),
+        'google':  'go',
+        # Servidor 2:
+        'googlesrv2': 'go',
     }
 
     balance = carregar_usuario(user_id)['saldo']
@@ -828,9 +953,8 @@ def cb_comprar(c):
     if balance < price:
         return bot.answer_callback_query(c.id, '❌ Saldo insuficiente.', True)
 
-    # ============ fluxo especial: sms24h (Servidor 2) ============
-    # keys que usam sms24h: srv2, mpsrv2, picsrv2, wa2, nubank, c6, neon
-    if key in ('srv2', 'mpsrv2', 'picsrv2', 'wa2', 'nubank', 'c6', 'neon'):
+    # ============ fluxo sms24h (Servidor 2) ============
+    if key in ('srv2', 'mpsrv2', 'picsrv2', 'wa2', 'nubank', 'c6', 'neon', 'googlesrv2'):
         resp = solicitar_numero_sms24h(idsms[key], operator="tim", country=COUNTRY_ID)
         if resp.get('status') != 'success':
             return bot.send_message(c.message.chat.id, '🚫 Sem números disponíveis.')
@@ -842,25 +966,16 @@ def cb_comprar(c):
         if not ok:
             return bot.send_message(c.message.chat.id, "⚠️ Erro ao descontar saldo ou duplicidade, tente novamente.")
 
-        # teclados com "comprar mesmo serviço"
         kb_blocked = telebot.types.InlineKeyboardMarkup()
         kb_blocked.row(telebot.types.InlineKeyboardButton('❌ Cancelar (2m)', callback_data=f'cancel_blocked_{aid}'))
-        kb_blocked.row(
-            telebot.types.InlineKeyboardButton('🛒 Comprar mesmo serviço', callback_data=f'comprar_{key}')
-        )
-        kb_blocked.row(
-            telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
-            telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu')
-        )
+        kb_blocked.row(telebot.types.InlineKeyboardButton('🛒 Comprar mesmo serviço', callback_data=f'comprar_{key}'))
+        kb_blocked.row(telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
+                       telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu'))
         kb_unlocked = telebot.types.InlineKeyboardMarkup()
         kb_unlocked.row(telebot.types.InlineKeyboardButton('❌ Cancelar', callback_data=f'cancel_{aid}'))
-        kb_unlocked.row(
-            telebot.types.InlineKeyboardButton('🛒 Comprar mesmo serviço', callback_data=f'comprar_{key}')
-        )
-        kb_unlocked.row(
-            telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
-            telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu')
-        )
+        kb_unlocked.row(telebot.types.InlineKeyboardButton('🛒 Comprar mesmo serviço', callback_data=f'comprar_{key}'))
+        kb_unlocked.row(telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
+                        telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu'))
         text = (
             f"📦 {service}\n"
             f"☎️ Número: `{full}`\n"
@@ -897,7 +1012,8 @@ def cb_comprar(c):
                 )
                 kb_sel = kb_blocked if minute < 2 else kb_unlocked
                 try:
-                    bot.edit_message_text(new_text, info['chat_id'], info['message_id'], parse_mode='Markdown', reply_markup=kb_sel)
+                    bot.edit_message_text(new_text, info['chat_id'], info['message_id'],
+                                          parse_mode='Markdown', reply_markup=kb_sel)
                 except telebot.apihelper.ApiTelegramException as e:
                     if "message is not modified" not in str(e): raise
                 except Exception:
@@ -917,30 +1033,24 @@ def cb_comprar(c):
         threading.Thread(target=auto_cancel, daemon=True).start()
         return
 
-    # ================== fluxo normal (smsbower) ==================
-    # determinar max_price
-    if key == 'c6srv1':
-        # >>> NOVO: C6 via SMSBower com teto de compra 0.8 USD
-        max_price = 0.80
-        limite = 0.80
+    # ================== fluxo smsbower (Servidor 1) ==================
+    s1_effective_cap = min(float(SMSBOWER_MAX_PRICE_CAP), float(S1_CAPS.get(key, 0.10)))
+
+    # Descobrir o "menor" preço (ou regra especial do WA)
+    if key == 'wa1':
+        base_max_price = obter_preco_wa_desc_v2(idsms[key], COUNTRY_ID, max_usd=s1_effective_cap)
     elif key == 'china2':
         with SCANNER_PRICE_LOCK:
             mp = SCANNER_LAST_PRICE
-        max_price = float(mp) if mp is not None else obter_menor_preco_v2(idsms[key], COUNTRY_ID)
-        limite = 0.10
-    elif key == 'wa1':
-        # WA (Servidor 1): escolher MAIOR preço <= 0.7 com qty>1
-        max_price = obter_preco_wa_desc_v2(idsms[key], COUNTRY_ID, max_usd=0.7)
-        limite = 0.70
+        base_max_price = float(mp) if mp is not None else obter_menor_preco_v2(idsms[key], COUNTRY_ID)
     else:
-        max_price = obter_menor_preco_v2(idsms[key], COUNTRY_ID)
-        # limite por serviço: outros até 0.20, demais até 0.10
-        limite = 0.20 if key == 'outros' else 0.10
+        base_max_price = obter_menor_preco_v2(idsms[key], COUNTRY_ID)
 
-    if (max_price is None) or (float(max_price) > limite):
+    if (base_max_price is None) or (float(base_max_price) > s1_effective_cap):
         return bot.send_message(c.message.chat.id, '🚫 Sem números disponíveis.')
 
-    resp = solicitar_numero_smsbower(idsms[key], max_price=float(max_price))
+    # Forçar compra no preço mínimo encontrado (para realmente “comprar o menor”)
+    resp = solicitar_numero_smsbower(idsms[key], max_price=float(base_max_price))
     if resp.get('status') != 'success':
         return bot.send_message(c.message.chat.id, '🚫 Sem números disponíveis.')
 
@@ -954,22 +1064,14 @@ def cb_comprar(c):
 
     kb_blocked = telebot.types.InlineKeyboardMarkup()
     kb_blocked.row(telebot.types.InlineKeyboardButton('❌ Cancelar (2m)', callback_data=f'cancel_blocked_{aid}'))
-    kb_blocked.row(
-        telebot.types.InlineKeyboardButton('🛒 Comprar mesmo serviço', callback_data=f'comprar_{key}')
-    )
-    kb_blocked.row(
-        telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
-        telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu')
-    )
+    kb_blocked.row(telebot.types.InlineKeyboardButton('🛒 Comprar mesmo serviço', callback_data=f'comprar_{key}'))
+    kb_blocked.row(telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
+                   telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu'))
     kb_unlocked = telebot.types.InlineKeyboardMarkup()
     kb_unlocked.row(telebot.types.InlineKeyboardButton('❌ Cancelar', callback_data=f'cancel_{aid}'))
-    kb_unlocked.row(
-        telebot.types.InlineKeyboardButton('🛒 Comprar mesmo serviço', callback_data=f'comprar_{key}')
-    )
-    kb_unlocked.row(
-        telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
-        telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu')
-    )
+    kb_unlocked.row(telebot.types.InlineKeyboardButton('🛒 Comprar mesmo serviço', callback_data=f'comprar_{key}'))
+    kb_unlocked.row(telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
+                    telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu'))
     text = (
         f"📦 {service}\n"
         f"☎️ Número: `{full}`\n"
@@ -1006,7 +1108,8 @@ def cb_comprar(c):
             )
             kb_sel = kb_blocked if minute < 2 else kb_unlocked
             try:
-                bot.edit_message_text(new_text, info['chat_id'], info['message_id'], parse_mode='Markdown', reply_markup=kb_sel)
+                bot.edit_message_text(new_text, info['chat_id'], info['message_id'],
+                                      parse_mode='Markdown', reply_markup=kb_sel)
             except telebot.apihelper.ApiTelegramException as e:
                 if "message is not modified" not in str(e): raise
             except Exception:
@@ -1061,8 +1164,6 @@ def spawn_sms_thread(aid):
                 return
 
             payload = status.split(':', 1)[1] if ':' in status else status
-
-            # sms24h: mostrar mensagem completa quando vier STATUS_OK:...
             display = payload
 
             if display not in info['codes']:
@@ -1114,7 +1215,6 @@ def retry_sms(c):
             pass
         bot.answer_callback_query(c.id, '🔄 Novo SMS solicitado.', show_alert=True)
     else:
-        # sms24h: solicitar novo SMS (status=3)
         set_status_sms24h(aid, 3)
         bot.answer_callback_query(c.id, '🔄 Novo SMS solicitado.', show_alert=True)
     spawn_sms_thread(aid)
@@ -1151,9 +1251,9 @@ def painel_admin():
     if token != PAINEL_TOKEN:
         return "Acesso negado.", 401
 
-    global SCANNER_ENABLED  # necessário para alterar no POST
-    global SERVICE_PRICES
-    global SERVICE_EMOJIS
+    global SCANNER_ENABLED
+    global SERVICE_PRICES, SERVICE_EMOJIS
+    global SMSBOWER_MAX_PRICE_CAP, S1_CAPS
 
     msg_feedback = ""
     if request.method == 'POST':
@@ -1188,7 +1288,6 @@ def painel_admin():
                         msg_feedback = f"Saldo de R$ {val:.2f} adicionado ao usuário {uid}."
             exportar_backup_json()
 
-        # ===== NOVO: ligar/desligar scanner China 2 =====
         elif action == 'scanner_onoff':
             op = request.form.get('op')
             if op == 'on':
@@ -1200,7 +1299,6 @@ def painel_admin():
             else:
                 msg_feedback = "Opção inválida para o scanner."
 
-        # ===== NOVO: definir manualmente serviço China 2 =====
         elif action == 'china2_manual':
             manual_code = (request.form.get('manual_code') or '').strip()
             if manual_code:
@@ -1209,7 +1307,6 @@ def painel_admin():
             else:
                 msg_feedback = "Informe um código de serviço válido (ex.: ki, ev, ...)."
 
-        # ===== NOVO: atualizar preços de todos os serviços =====
         elif action == 'update_prices':
             changed = []
             for key in SERVICE_PRICES.keys():
@@ -1224,11 +1321,11 @@ def painel_admin():
                         except:
                             pass
             if changed:
+                save_prices_emojis_to_db()
                 msg_feedback = "Preços atualizados:\n" + "\n".join(changed)
             else:
                 msg_feedback = "Nenhum preço alterado."
 
-        # ===== NOVO: atualizar emojis dos botões =====
         elif action == 'update_emojis':
             changed = []
             for key in SERVICE_EMOJIS.keys():
@@ -1239,9 +1336,44 @@ def painel_admin():
                         SERVICE_EMOJIS[key] = val_str
                         changed.append(f"{SERVICE_NAMES.get(key, key)} → {val_str}")
             if changed:
+                save_prices_emojis_to_db()
                 msg_feedback = "Emojis atualizados:\n" + "\n".join(changed)
             else:
                 msg_feedback = "Nenhum emoji alterado."
+
+        elif action == 'update_smsg_cap':
+            val_str = (request.form.get('smsg_cap') or '').strip()
+            try:
+                new_cap = float(val_str)
+                if new_cap <= 0:
+                    raise ValueError()
+                SMSBOWER_MAX_PRICE_CAP = new_cap
+                save_smsg_cap_to_db()
+                msg_feedback = f"Limite máximo GLOBAL do SMSBower atualizado para US$ {SMSBOWER_MAX_PRICE_CAP:.4f}"
+            except:
+                msg_feedback = "Valor inválido para CAP global do SMSBower."
+
+        # >>> NOVO: atualizar caps por serviço (Servidor 1)
+        elif action == 'update_s1_caps':
+            changed = []
+            for key in DEFAULT_S1_CAPS.keys():
+                field = f"cap_{key}"
+                if field in request.form:
+                    vs = (request.form.get(field) or "").strip()
+                    if vs:
+                        try:
+                            val = float(vs)
+                            if val <= 0:
+                                continue
+                            S1_CAPS[key] = val
+                            changed.append(f"{SERVICE_NAMES.get(key, key)} → US$ {val:.4f}")
+                        except:
+                            pass
+            if changed:
+                save_s1_caps_to_db()
+                msg_feedback = "Limites por serviço (Servidor 1) atualizados:\n" + "\n".join(changed)
+            else:
+                msg_feedback = "Nenhum limite por serviço alterado."
 
     with get_db_conn() as conn:
         with conn.cursor() as cur:
@@ -1252,11 +1384,9 @@ def painel_admin():
             cur.execute("SELECT count(*) FROM numeros_sms WHERE sms_recebido=TRUE")
             recebidos = cur.fetchone()['count']
 
-    # status atual do scanner e código em uso para china2
     with SERVICE_CODE_LOCK:
         china2_code = GLOBAL_SERVICE_MAP.get('china2')
 
-    # ordenar serviços por nome para exibir no painel
     items_sorted = sorted(SERVICE_PRICES.items(), key=lambda kv: SERVICE_NAMES.get(kv[0], kv[0]).lower())
 
     return render_template_string("""
@@ -1295,7 +1425,32 @@ def painel_admin():
         </form>
 
         <hr>
-        <h3>Preços dos serviços</h3>
+        <h3>CAP Global do SMSBower (servidor "any")</h3>
+        <form method="post" style="margin-bottom: 16px;">
+            <input type="hidden" name="action" value="update_smsg_cap">
+            Máximo em dólar para compras no SMSBower: 
+            <input name="smsg_cap" type="number" step="0.0001" value="{{ '%.4f'|format(smsg_cap) }}" required>
+            <button type="submit">Salvar CAP Global</button>
+        </form>
+
+        <hr>
+        <h3>Limites (USD) por serviço - Servidor 1 (SMSBower)</h3>
+        <form method="post">
+            <input type="hidden" name="action" value="update_s1_caps">
+            <table border="1" cellpadding="6" cellspacing="0">
+                <tr><th>Serviço</th><th>Limite USD (maxPrice)</th></tr>
+                {% for key, label in s1_caps_labels %}
+                <tr>
+                    <td>{{ label }}</td>
+                    <td><input name="cap_{{key}}" type="number" step="0.0001" value="{{ '%.4f'|format(s1_caps[key]) }}"></td>
+                </tr>
+                {% endfor %}
+            </table>
+            <button type="submit" style="margin-top:10px;">Salvar Limites</button>
+        </form>
+
+        <hr>
+        <h3>Preços dos serviços (R$ no bot)</h3>
         <form method="post">
             <input type="hidden" name="action" value="update_prices">
             <table border="1" cellpadding="6" cellspacing="0">
@@ -1341,7 +1496,19 @@ def painel_admin():
         </ul>
     """, msg_feedback=msg_feedback, total=total, cancelados=cancelados, recebidos=recebidos,
        scanner_enabled=SCANNER_ENABLED, china2_code=china2_code,
-       items_sorted=items_sorted, service_names=SERVICE_NAMES, service_emojis=SERVICE_EMOJIS)
+       items_sorted=items_sorted, service_names=SERVICE_NAMES, service_emojis=SERVICE_EMOJIS,
+       smsg_cap=SMSBOWER_MAX_PRICE_CAP,
+       s1_caps=S1_CAPS,
+       s1_caps_labels=[
+           ('mercado', SERVICE_NAMES['mercado']),
+           ('china', SERVICE_NAMES['china']),
+           ('china2', SERVICE_NAMES['china2']),
+           ('picpay', SERVICE_NAMES['picpay']),
+           ('wa1', SERVICE_NAMES['wa1']),
+           ('outros', SERVICE_NAMES['outros']),
+           ('c6srv1', SERVICE_NAMES['c6srv1']),
+           ('google', SERVICE_NAMES['google']),
+       ])
 
 # =========================================================
 # =================== HEALTH / WEBHOOKS ===================
@@ -1406,23 +1573,17 @@ def mp_webhook():
                         exportar_backup_json()
                         bot.send_message(uid, f"✅ Recarga de R$ {amt:.2f} confirmada! Seu novo saldo é R$ {current + amt:.2f}")
 
-                        # ---------- AQUI É A MUDANÇA ----------
-                        # Monta a mesma mensagem e envia para ADMIN e para o CANAL
                         msg_dep = (
                             f"💰 Novo DEPÓSITO\n"
                             f"User: {uid}\n"
                             f"Valor: R$ {amt:.2f}\n"
                             f"Data: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}{ref_text}"
                         )
-
-                        # Admin (como já fazia)
                         enviar_mensagem_bot(admin_bot, ADMIN_CHAT_ID, msg_dep)
-                        # Canal de histórico (NOVO) - requer admin do canal
                         try:
                             enviar_mensagem_bot(admin_bot, HIST_CHANNEL, msg_dep)
                         except Exception as e:
                             logger.error(f"Falha ao publicar no canal de histórico: {e}")
-                        # ---------- FIM DA MUDANÇA ----------
 
         except Exception as e:
             logger.error(f"[MP] Erro webhook: {e}")
@@ -1440,7 +1601,6 @@ SCANNER_COUNTRY_ID = "14"  # Brazil na resposta do getPricesByService
 def scanner_loop():
     while True:
         try:
-            # >>> NOVO: respeitar o liga/desliga do painel
             if not SCANNER_ENABLED:
                 logger.info("[SCANNER] Pausado (desligado pelo admin).")
                 time.sleep(SCANNER_INTERVAL_SEC)

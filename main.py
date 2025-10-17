@@ -210,7 +210,7 @@ SERVICE_PRICES = {
     'mercado':  0.75,
     'mpsrv2':   0.90,   # atualizado conforme pedido
     'china':    0.60,
-    'china2':   0.60,
+    'china2':  0.60,
     'picpay':   0.65,
     'picsrv2':  0.70,
     'wa1':      6.50,
@@ -223,8 +223,6 @@ SERVICE_PRICES = {
     'neon':     0.39,
     # >>> NOVO: C6 via SMSBower (Srv1) com preço R$ 0,64
     'c6srv1':   0.64,
-    # >>> NOVO: PicPay Servidor Melhor (SMSBower, provider 3018)
-    'picbest':  0.90,
 }
 
 # >>> rótulos sem abreviação e WhatsApp sem "Srv1"
@@ -245,8 +243,6 @@ SERVICE_NAMES = {
     'neon':    'Neon SMS Servidor 2',
     # >>> NOVO: label do C6 (Srv1 / SMSBower)
     'c6srv1':  'C6 Bank SMS',
-    # >>> NOVO: PicPay melhor
-    'picbest': 'PicPay Servidor Melhor',
 }
 
 # >>> NOVO: emojis editáveis no painel para os botões de compra
@@ -266,8 +262,6 @@ SERVICE_EMOJIS = {
     'neon':    '🏦',
     # >>> NOVO: emoji para C6 (Srv1)
     'c6srv1':  '🏦',
-    # >>> NOVO: emoji picbest
-    'picbest': '💸',
 }
 
 # =========================================================
@@ -424,50 +418,15 @@ def enviar_documento_bot(bot_instance, chat_id, file_path, tentativas=3):
             time.sleep(1)
     return False
 
-# >>>>>>> ALTERADA: suporta getNumberV2 (JSON) quando provider_ids é passado
-def solicitar_numero_smsbower(servico, max_price=None, provider_ids=None):
-    """
-    Quando 'provider_ids' for informado, usa getNumberV2 (JSON) com filtro por providerIds.
-    Caso contrário, usa getNumber (texto).
-    """
-    base_params = {
+def solicitar_numero_smsbower(servico, max_price=None):
+    params = {
         'api_key': API_KEY_SMSBOWER,
+        'action': 'getNumber',
         'service': servico,
         'country': COUNTRY_ID
     }
     if max_price is not None:
-        base_params['maxPrice'] = f"{float(max_price):.4f}"
-
-    # Caminho V2 (JSON) quando precisamos travar provider(s)
-    if provider_ids:
-        params = dict(base_params)
-        params.update({
-            'action': 'getNumberV2',
-            'providerIds': provider_ids,
-        })
-        try:
-            r = requests.get(SMSBOWER_URL, params=params, timeout=30)
-            r.raise_for_status()
-            data = r.json()
-        except ValueError:
-            txt = r.text.strip()
-            logger.error(f"getNumberV2 sem JSON: {txt}")
-            return {"status": "error", "message": txt}
-        except Exception as e:
-            logger.error(f"Erro getNumberV2 smsbower: {e}")
-            return {"status":"error","message":str(e)}
-
-        aid = data.get("activationId") or data.get("id") or data.get("activation_id")
-        num = data.get("phoneNumber") or data.get("phone") or data.get("phone_number")
-        if aid and num:
-            return {"status":"success","id":str(aid), "number":str(num)}
-        if isinstance(data, dict) and data.get("error"):
-            return {"status":"error","message":data.get("error")}
-        return {"status":"error","message":f"Resposta desconhecida V2: {data}"}
-
-    # Caminho clássico (texto)
-    params = dict(base_params)
-    params['action'] = 'getNumber'
+        params['maxPrice'] = f"{max_price:.4f}"
     try:
         r = requests.get(SMSBOWER_URL, params=params, timeout=15)
         r.raise_for_status()
@@ -492,7 +451,6 @@ def cancelar_numero_smsbower(aid):
     except Exception as e:
         logger.error(f"Erro cancelar smsbower: {e}")
 
-# >>>>>>> ALTERADA: entende JSON (smsCode/smsText) e normaliza para STATUS_OK:...
 def obter_status_smsbower(aid):
     try:
         r = requests.get(
@@ -501,15 +459,6 @@ def obter_status_smsbower(aid):
             timeout=10
         )
         r.raise_for_status()
-        # tenta JSON primeiro
-        try:
-            j = r.json()
-            if isinstance(j, dict):
-                code = j.get("smsCode") or j.get("smsText") or j.get("sms")
-                if code:
-                    return f"STATUS_OK:{code}"
-        except ValueError:
-            pass
         return r.text.strip()
     except Exception as e:
         logger.error(f"Erro getStatus smsbower: {e}")
@@ -639,46 +588,6 @@ def obter_menor_preco_v2(service_code, country_id):
     candidatos.sort()
     return candidatos[0]
 
-# >>>>>> NOVA: menor preço com quantidade mínima e teto opcional
-def obter_menor_preco_v2_com_qtd(service_code, country_id, min_qty=1, max_price=None):
-    try:
-        r = requests.get(
-            SMSBOWER_URL,
-            params={
-                'api_key': API_KEY_SMSBOWER,
-                'action': 'getPricesV2',
-                'service': service_code,
-                'country': country_id
-            },
-            timeout=12
-        )
-        r.raise_for_status()
-        data = r.json()
-    except Exception as e:
-        logger.error(f"[getPricesV2 qty] erro: {e}")
-        return None
-
-    country_map = data.get(str(country_id)) or data.get(country_id) or {}
-    svc_map = country_map.get(service_code) or {}
-    if not isinstance(svc_map, dict) or not svc_map:
-        return None
-
-    candidatos = []
-    for price_str, qty in svc_map.items():
-        try:
-            p = float(str(price_str).replace(',', '.'))
-            q = int(qty)
-        except:
-            continue
-        if q >= min_qty and (max_price is None or p <= max_price):
-            candidatos.append(p)
-
-    if not candidatos:
-        return None
-
-    candidatos.sort()
-    return candidatos[0]
-
 # ========= preço WA especial: decrescente até <= 0.7 com qty>1 =========
 def obter_preco_wa_desc_v2(service_code, country_id, max_usd=0.7):
     """
@@ -764,7 +673,6 @@ def show_comprar_menu(chat_id):
     add_btn('china')
     add_btn('china2')
     add_btn('picpay')
-    add_btn('picbest')   # << novo botão PicPay Melhor
     add_btn('picsrv2')
     add_btn('wa1')   # WhatsApp
     add_btn('wa2')   # WhatsApp Servidor 2
@@ -897,7 +805,6 @@ def cb_comprar(c):
         'china':   get_service_code('china'),    # smsbower
         'china2':  get_service_code('china2'),   # smsbower
         'picpay':  get_service_code('picpay'),   # smsbower
-        'picbest': 'ev',                         # smsbower (PicPay “melhor”)
         'picsrv2': 'ev',                         # sms24h - PicPay
         'wa1':     'wa',                         # smsbower - WhatsApp
         'wa2':     'wa',                         # sms24h  - WhatsApp
@@ -1012,17 +919,10 @@ def cb_comprar(c):
 
     # ================== fluxo normal (smsbower) ==================
     # determinar max_price
-    if key == 'picbest':
-        # procura menor preço com pelo menos 3 números e <= 0.08 USD
-        cap = 0.08
-        max_price = obter_menor_preco_v2_com_qtd(idsms[key], COUNTRY_ID, min_qty=3, max_price=cap)
-        if max_price is None:
-            max_price = cap
-        limite = cap
-    elif key == 'c6srv1':
-        # C6 via SMSBower com qty>=3 e teto 0.08
-        max_price = obter_menor_preco_v2_com_qtd(idsms[key], COUNTRY_ID, min_qty=3, max_price=0.08) or 0.08
-        limite = 0.08
+    if key == 'c6srv1':
+        # >>> NOVO: C6 via SMSBower com teto de compra 0.8 USD
+        max_price = 0.80
+        limite = 0.80
     elif key == 'china2':
         with SCANNER_PRICE_LOCK:
             mp = SCANNER_LAST_PRICE
@@ -1040,13 +940,7 @@ def cb_comprar(c):
     if (max_price is None) or (float(max_price) > limite):
         return bot.send_message(c.message.chat.id, '🚫 Sem números disponíveis.')
 
-    # compra no SMSBower
-    if key == 'picbest':
-        # força provider 3018 via getNumberV2
-        resp = solicitar_numero_smsbower(idsms[key], max_price=float(max_price), provider_ids="3018")
-    else:
-        resp = solicitar_numero_smsbower(idsms[key], max_price=float(max_price))
-
+    resp = solicitar_numero_smsbower(idsms[key], max_price=float(max_price))
     if resp.get('status') != 'success':
         return bot.send_message(c.message.chat.id, '🚫 Sem números disponíveis.')
 

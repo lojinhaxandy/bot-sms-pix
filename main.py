@@ -704,7 +704,7 @@ def obter_menor_preco_v2(service_code, country_id):
             q = int(qty)
         except:
             q = 0
-        if q > 0:
+        if q > 4:
             candidatos.append(p)
 
     if not candidatos:
@@ -1670,3 +1670,4 @@ if __name__ == '__main__':
     except Exception as e:
         logger.error(f"Erro set_webhook: {e}")
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+

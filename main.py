@@ -747,7 +747,7 @@ def obter_preco_wa_desc_v2(service_code, country_id, max_usd=0.7):
             q = int(qty)
         except:
             q = 0
-        if p <= max_usd and q > 1:
+        if p <= max_usd and q > 5:
             candidatos.append((p, q))
 
     if not candidatos:
@@ -755,7 +755,7 @@ def obter_preco_wa_desc_v2(service_code, country_id, max_usd=0.7):
 
     candidatos.sort(key=lambda x: x[0], reverse=True)
     escolhido = candidatos[0][0]
-    logger.info(f"[WA] preço escolhido (<= {max_usd} c/ qty>1): {escolhido}")
+    logger.info(f"[WA] preço escolhido (<= {max_usd} c/ qty>5): {escolhido}")
     return escolhido
 
 # =========================================================
@@ -1670,4 +1670,3 @@ if __name__ == '__main__':
     except Exception as e:
         logger.error(f"Erro set_webhook: {e}")
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
-

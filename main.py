@@ -596,7 +596,7 @@ def sms24h_key_ok():
         return False
     return True
 
-def solicitar_numero_sms24h(service_code, operator="tim", country="73"):
+def solicitar_numero_sms24h(service_code, operator="any", country="73"):
     if not sms24h_key_ok():
         return {"status":"error","message":"NO_KEY"}
     for op in [operator, "any"]:
@@ -955,7 +955,7 @@ def cb_comprar(c):
 
     # ============ fluxo sms24h (Servidor 2) ============
     if key in ('srv2', 'mpsrv2', 'picsrv2', 'wa2', 'nubank', 'c6', 'neon', 'googlesrv2'):
-        resp = solicitar_numero_sms24h(idsms[key], operator="tim", country=COUNTRY_ID)
+        resp = solicitar_numero_sms24h(idsms[key], operator="any", country=COUNTRY_ID)
         if resp.get('status') != 'success':
             return bot.send_message(c.message.chat.id, '🚫 Sem números disponíveis.')
         aid   = resp['id']

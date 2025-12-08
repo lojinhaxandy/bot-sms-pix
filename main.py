@@ -741,15 +741,33 @@ def api_status():
 
     # recebeu SMS
     if "STATUS_OK" in status_resp or ":" in status_resp:
-        code = status_resp.split(":", 1)[1]
-        if code not in info['codes']:
-            info['codes'].append(code)
-            registrar_sms_recebido(aid)
+        raw = status_resp.split(":", 1)[1]
 
+    # --- FILTRO ESPECIAL SOMENTE PARA CHINA 3 ---
+    if info.get("service_key") == "china3":
+        nums = re.findall(r"\d+", raw)
+        clean_codes = []
+        for n in nums:
+            if len(n) >= 4:
+                if n not in info["codes"]:
+                    info["codes"].append(n)
+                clean_codes.append(n)
+
+        registrar_sms_recebido(aid)
         return {
             "status": "received",
-            "sms": info['codes']
+            "sms": clean_codes   # <- só códigos puros
         }
+
+    # --- OUTROS SERVIÇOS NORMAL ---
+    if raw not in info['codes']:
+        info['codes'].append(raw)
+        registrar_sms_recebido(aid)
+
+    return {
+        "status": "received",
+        "sms": info['codes']
+    }
 
     return {"status": "unknown", "raw": status_resp}
 
@@ -938,6 +956,187 @@ def api_wait():
         "sms": info.get("codes", []),
         "timeout": True
     }
+@app.route('/api-docs')
+def public_api_docs():
+    return render_template_string("""
+    <html>
+    <head>
+        <title>Documentação API - ChinaSMSBot</title>
+        <style>
+            body { font-family: Arial; max-width: 850px; margin: auto; padding: 20px; }
+            code, pre { background: #f7f7f7; padding: 6px; display: block; border-radius: 6px; }
+            h2 { color: #333; }
+            table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+            table, th, td { border: 1px solid #ccc; }
+            th, td { padding: 8px; text-align: left; }
+            th { background: #eee; }
+        </style>
+    </head>
+    <body>
+
+    <h2>📘 API Pública — ChinaSMSBot</h2>
+    <p>Use esta API para comprar números, consultar SMS e integrar seu site/app automaticamente.</p>
+
+    <hr>
+
+    <h3>🔑 Autenticação</h3>
+    <p>O usuário precisa gerar um token no bot Telegram enviando <b>/token</b>.</p>
+
+<pre>{
+    "token": "TOKEN_DO_USUARIO"
+}</pre>
+
+    <hr>
+
+    <h3>📦 /api/buy — Comprar número</h3>
+    <p><b>POST</b> <code>{{site}}/api/buy</code></p>
+
+<h4>Body JSON:</h4>
+<pre>{
+    "token": "TOKEN_DO_USUARIO",
+    "service": "mercado"
+}</pre>
+
+<h4>Serviços disponíveis:</h4>
+<table>
+<tr><th>Chave</th><th>Nome</th><th>Preço (R$)</th></tr>
+{% for key, name in service_names.items() %}
+<tr><td>{{key}}</td><td>{{name}}</td><td>{{prices[key]}}</td></tr>
+{% endfor %}
+</table>
+
+<h4>Resposta de sucesso:</h4>
+<pre>{
+  "status": "success",
+  "aid": "123456",
+  "number": "5511999999999",
+  "short": "11999999999",
+  "price": 0.75,
+  "saldo_restante": 4.25,
+  "provider": "servidor 2"
+}</pre>
+
+<hr>
+
+<h3>📮 /api/status — Verificar status do SMS</h3>
+<pre>{
+  "token": "TOKEN_DO_USUARIO",
+  "aid": "123456"
+}</pre>
+
+Possíveis respostas:
+
+<pre>{
+  "status": "waiting",
+  "sms": []
+}
+
+{
+  "status": "received",
+  "sms": ["123456"]
+}
+
+{
+  "status": "canceled",
+  "sms": []
+}
+</pre>
+
+<hr>
+
+<h3>🚫 /api/cancel — Cancelar número</h3>
+<pre>{
+  "token": "TOKEN_DO_USUARIO",
+  "aid": "123456"
+}</pre>
+
+Resposta:
+<pre>{
+  "status": "canceled",
+  "saldo": 12.50
+}</pre>
+
+<hr>
+
+<h3>🔄 /api/retry — Pedir outro SMS</h3>
+<pre>{
+  "token": "TOKEN_DO_USUARIO",
+  "aid": "123456"
+}</pre>
+
+<hr>
+
+<h3>⌛ /api/wait — Esperar SMS (long-polling)</h3>
+<pre>{
+  "token": "TOKEN_DO_USUARIO",
+  "aid": "123456",
+  "timeout": 90
+}</pre>
+
+Se recebeu:
+<pre>{
+  "status": "received",
+  "sms": ["123456"]
+}</pre>
+
+Timeout:
+<pre>{
+  "status": "waiting",
+  "sms": [],
+  "timeout": true
+}</pre>
+
+<hr>
+
+<h3>💰 /api/balance — Consultar saldo</h3>
+<pre>{
+  "token": "TOKEN_DO_USUARIO"
+}</pre>
+
+<hr>
+
+<h3>📌 Códigos de Erro</h3>
+<ul>
+<li>400 — Campos obrigatórios faltando</li>
+<li>401 — Token inválido</li>
+<li>402 — Saldo insuficiente</li>
+<li>403 — AID não pertence ao usuário</li>
+<li>404 — AID inexistente</li>
+<li>503 — Sem números disponíveis</li>
+</ul>
+
+<hr>
+
+<h3>🧪 Exemplos prontos</h3>
+
+<h4>cURL</h4>
+<pre>
+curl -X POST {{site}}/api/buy 
+     -H "Content-Type: application/json" 
+     -d '{"token":"TOKEN","service":"china"}'
+</pre>
+
+<h4>Python</h4>
+<pre>
+import requests
+r = requests.post("{{site}}/api/buy", json={
+    "token": "TOKEN",
+    "service": "mercado"
+})
+print(r.json())
+</pre>
+
+<hr>
+<p>Atualizado em {{now}}</p>
+
+    </body>
+    </html>
+    """,
+    site=SITE_URL,
+    now=datetime.now().strftime("%d/%m/%Y %H:%M"),
+    service_names=SERVICE_NAMES,
+    prices=SERVICE_PRICES
+    )
 
 # =========================================================
 # ============= SALDO / NÚMEROS (mantido) =================
@@ -1252,6 +1451,7 @@ def send_menu(chat_id):
         telebot.types.InlineKeyboardButton('🤑 Recarregar', callback_data='menu_recarregar'),
         telebot.types.InlineKeyboardButton('👥 Referências', callback_data='menu_refer'),
         telebot.types.InlineKeyboardButton('📜 Meus números', callback_data='menu_numeros'),
+        telebot.types.InlineKeyboardButton('📘 Documentação API', url=f"{SITE_URL}/api-docs"),
         telebot.types.InlineKeyboardButton('🆘 Suporte', url='https://t.me/cpfbotttchina')
     )
     bot.send_message(chat_id, 'Escolha uma opção:', reply_markup=kb)
@@ -1502,9 +1702,10 @@ def cb_comprar(c):
                         telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu'))
         text = (
             f"📦 {service}\n"
+            f"🆔 *ID de ativação:* `{aid}`\n"
             f"☎️ Número: `{full}`\n"
             f"☎️ Sem DDI: `{short}`\n\n"
-            f"🕘 Prazo: {PRAZO_MINUTOS} minutos\n\n"
+            f"🕘 Prazo: {rem} minutos\n\n"
             f"💡 Ativo por {PRAZO_MINUTOS} minutos; sem SMS, saldo devolvido automaticamente."
         )
         msg = bot.send_message(c.message.chat.id, text, parse_mode='Markdown', reply_markup=kb_blocked)
@@ -1532,17 +1733,25 @@ def cb_comprar(c):
                     f"🆔 *ID de ativação:* `{aid}`\n"
                     f"☎️ Número: `{full}`\n"
                     f"☎️ Sem DDI: `{short}`\n\n"
-                    f"🕘 Prazo: {PRAZO_MINUTOS} minutos\n\n"
+                    f"🕘 Prazo: {rem} minutos\n\n"
                     f"💡 Ativo por {PRAZO_MINUTOS} minutos; sem SMS, saldo devolvido automaticamente."
                 )
                 kb_sel = kb_blocked if minute < 2 else kb_unlocked
                 try:
-                    bot.edit_message_text(new_text, info['chat_id'], info['message_id'],
-                                          parse_mode='Markdown', reply_markup=kb_sel)
+                    bot.edit_message_text(
+                        new_text,
+                        info['chat_id'],
+                        info['message_id'],
+                        parse_mode='Markdown',
+                        reply_markup=kb_sel
+                    )
                 except telebot.apihelper.ApiTelegramException as e:
-                    if "message is not modified" not in str(e): raise
-                except Exception:
-                    pass
+                    # IGNORA erros de mensagem sumida
+                    if "message to edit not found" in str(e) or "message is not modified" in str(e):
+                        return
+                    else:
+                        raise
+
 
         def auto_cancel():
             time.sleep(PRAZO_SEGUNDOS)
@@ -1605,7 +1814,7 @@ def cb_comprar(c):
         f"📦 {service}\n"
         f"☎️ Número: `{full}`\n"
         f"☎️ Sem DDI: `{short}`\n\n"
-        f"🕘 Prazo: {PRAZO_MINUTOS} minutos\n\n"
+        f"🕘 Prazo: {rem} minutos\n\n"
         f"💡 Ativo por {PRAZO_MINUTOS} minutos; sem SMS, saldo devolvido automaticamente."
     )
     msg = bot.send_message(c.message.chat.id, text, parse_mode='Markdown', reply_markup=kb_blocked)
@@ -1637,12 +1846,19 @@ def cb_comprar(c):
             )
             kb_sel = kb_blocked if minute < 2 else kb_unlocked
             try:
-                bot.edit_message_text(new_text, info['chat_id'], info['message_id'],
-                                      parse_mode='Markdown', reply_markup=kb_sel)
+                bot.edit_message_text(
+                    new_text,
+                    info['chat_id'],
+                    info['message_id'],
+                    parse_mode='Markdown',
+                    reply_markup=kb_sel
+                )
             except telebot.apihelper.ApiTelegramException as e:
-                if "message is not modified" not in str(e): raise
-            except Exception:
-                pass
+                # IGNORA erros de mensagem sumida
+                if "message to edit not found" in str(e) or "message is not modified" in str(e):
+                    return
+                else:
+                    raise
 
     def auto_cancel():
         time.sleep(PRAZO_SEGUNDOS)

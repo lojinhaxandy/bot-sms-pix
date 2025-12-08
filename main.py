@@ -337,8 +337,11 @@ def handle_reactivate(m):
         )
         r.raise_for_status()
         txt = r.text.strip()
-    except Exception as e:
-        return bot.send_message(m.chat.id, f"❌ Erro na API: {e}")
+    except requests.exceptions.HTTPError:
+        return bot.send_message(m.chat.id, "❌ Erro: A reativação não está disponível no momento.")
+    except Exception:
+        return bot.send_message(m.chat.id, "❌ Erro inesperado. Tente novamente.")
+
 
     if txt.startswith("ACCESS_NUMBER:"):
         _a, new_aid, new_phone = txt.split(":", 2)

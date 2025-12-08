@@ -582,7 +582,7 @@ def api_buy():
         "short": short,
         "provider": provider,
         "chat_id": None,  # Sem envio para Telegram
-        "message_id": None
+        "message_id": None,
         "is_api": True
     }
 

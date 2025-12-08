@@ -616,7 +616,7 @@ def api_buy():
         return {"error": "saldo insuficiente", "saldo": saldo}, 402
 
     # identificar provider
-            idsms = {
+    idsms = {
         'mercado':     get_service_code('mercado'),
         'mpsrv2':      'cq',
         'china':       get_service_code('china'),

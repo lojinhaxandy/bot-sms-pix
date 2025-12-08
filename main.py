@@ -83,6 +83,17 @@ def criar_tabela_numeros_sms():
                 )
             """)
             conn.commit()
+def criar_tabela_api_tokens():
+    with get_db_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS api_tokens (
+                user_id TEXT PRIMARY KEY,
+                token TEXT UNIQUE NOT NULL
+            )
+        """)
+        conn.commit()
+
+criar_tabela_api_tokens()
 
 def criar_tabela_payments():
     with get_db_conn() as conn, conn.cursor() as cur:
@@ -298,6 +309,19 @@ DEFAULT_S1_CAPS = {
     'google':  0.11,  # solicitado
 }
 S1_CAPS = DEFAULT_S1_CAPS.copy()
+import secrets
+
+def get_or_create_api_token(user_id):
+    with get_db_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT token FROM api_tokens WHERE user_id=%s", (str(user_id),))
+        row = cur.fetchone()
+        if row:
+            return row['token']
+
+        token = secrets.token_hex(32)
+        cur.execute("INSERT INTO api_tokens (user_id, token) VALUES (%s, %s)", (str(user_id), token))
+        conn.commit()
+        return token
 
 # ---------- Persistência de preços, emojis, caps ----------
 def save_prices_emojis_to_db():
@@ -462,6 +486,116 @@ def exportar_backup_json():
 # =========================================================
 # ============= SALDO / NÚMEROS (mantido) =================
 # =========================================================
+@bot.message_handler(commands=['token'])
+def cmd_token(m):
+    criar_usuario(m.from_user.id)
+    tk = get_or_create_api_token(m.from_user.id)
+    bot.send_message(m.chat.id, f"🔑 Seu token API:\n`{tk}`", parse_mode='Markdown')
+@app.route('/api/buy', methods=['POST'])
+def api_buy():
+    data = request.json or {}
+
+    token = data.get("token")
+    service = data.get("service")  # exemplo: mercado, china, google...
+
+    if not token or not service:
+        return {"error": "token e service são obrigatórios"}, 400
+
+    # validar token
+    with get_db_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT user_id FROM api_tokens WHERE token=%s", (token,))
+        row = cur.fetchone()
+
+    if not row:
+        return {"error": "token inválido"}, 401
+
+    user_id = row['user_id']
+
+    # validar user
+    user = carregar_usuario(user_id)
+    if not user:
+        return {"error": "usuário inexistente"}, 404
+
+    # validar serviço
+    if service not in SERVICE_PRICES:
+        return {"error": "serviço inválido"}, 400
+
+    price = SERVICE_PRICES[service]
+    saldo = user['saldo']
+
+    if saldo < price:
+        return {"error": "saldo insuficiente", "saldo": saldo}, 402
+
+    # identificar provider
+    idsms = {
+        'mercado': get_service_code('mercado'),
+        'mpsrv2':  'cq',
+        'china':   get_service_code('china'),
+        'china2':  get_service_code('china2'),
+        'picpay':  get_service_code('picpay'),
+        'picsrv2': 'ev',
+        'wa1':     'wa',
+        'wa2':     'wa',
+        'outros':  get_service_code('outros'),
+        'srv2':    'ot',
+        'nubank':  'aaa',
+        'c6':      'aff',
+        'neon':    'aex',
+        'c6srv1':  get_service_code('outros'),
+        'google':  'go',
+        'googlesrv2': 'go',
+    }
+
+    service_code = idsms.get(service)
+
+    if not service_code:
+        return {"error": "serviço sem configuração"}, 400
+
+    # servidor SMS24H
+    if service in ('srv2', 'mpsrv2', 'picsrv2', 'wa2', 'nubank', 'c6', 'neon', 'googlesrv2'):
+        resp = solicitar_numero_sms24h(service_code)
+        provider = 'sms24h'
+    else:
+        resp = solicitar_numero_smsbower(service_code)
+        provider = 'smsbower'
+
+    if resp.get('status') != 'success':
+        return {"error": "sem números disponíveis"}, 503
+
+    aid = resp['id']
+    full = resp['number']
+    short = full[2:] if full.startswith('55') else full
+
+    ok = comprar_numero_atomico(user_id, aid, price)
+
+    if not ok:
+        return {"error": "erro ao descontar saldo / duplicidade"}, 500
+
+    # registrar para thread de SMS
+    status_map[aid] = {
+        "user_id": user_id,
+        "price": price,
+        "service": service,
+        "service_key": service,
+        "full": full,
+        "short": short,
+        "provider": provider,
+        "chat_id": None,  # Sem envio para Telegram
+        "message_id": None
+    }
+
+    spawn_sms_thread(aid)
+
+    return {
+        "status": "success",
+        "aid": aid,
+        "number": full,
+        "short": short,
+        "price": price,
+        "saldo_restante": float(carregar_usuario(user_id)['saldo']),
+        "provider": provider
+    }, 200
+
 def comprar_numero_atomico(uid, aid, price):
     with get_db_conn() as conn:
         with conn.cursor() as cur:

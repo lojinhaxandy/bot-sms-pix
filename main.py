@@ -49,6 +49,7 @@ backup_bot  = telebot.TeleBot(BACKUP_BOT_TOKEN)
 admin_bot   = telebot.TeleBot(ADMIN_BOT_TOKEN)
 mp_client   = mercadopago.SDK(MP_ACCESS_TOKEN)
 app = Flask(__name__)
+PENDING_REACT = {}
 
 # =========================================================
 # ==================== BANCO DE DADOS =====================
@@ -310,6 +311,71 @@ DEFAULT_S1_CAPS = {
 }
 S1_CAPS = DEFAULT_S1_CAPS.copy()
 import secrets
+@bot.message_handler(func=lambda m: PENDING_REACT.get(m.from_user.id))
+def handle_reactivate(m):
+    uid = m.from_user.id
+    aid_old = m.text.strip()
+    PENDING_REACT.pop(uid, None)
+
+    # Preço igual serviço 'srv2' (Servidor 2)
+    price = SERVICE_PRICES.get('srv2', 0.90)
+
+    user = carregar_usuario(uid)
+    if user['saldo'] < price:
+        return bot.send_message(m.chat.id, "❌ Saldo insuficiente.")
+
+    # Chama API getExtraActivation
+    try:
+        r = requests.get(
+            SMS24H_URL,
+            params={
+                'api_key': API_KEY_SMS24H,
+                'action': 'getExtraActivation',
+                'activationId': aid_old
+            },
+            timeout=12
+        )
+        r.raise_for_status()
+        txt = r.text.strip()
+    except Exception as e:
+        return bot.send_message(m.chat.id, f"❌ Erro na API: {e}")
+
+    if txt.startswith("ACCESS_NUMBER:"):
+        _a, new_aid, new_phone = txt.split(":", 2)
+
+        ok = comprar_numero_atomico(uid, new_aid, price)
+        if not ok:
+            return bot.send_message(m.chat.id, "⚠ Erro ao descontar saldo, tente novamente.")
+
+        short = new_phone[2:] if new_phone.startswith("55") else new_phone
+
+        bot.send_message(
+            m.chat.id,
+            f"♻ *Reativado com sucesso!*\n\n"
+            f"🆔 *ID de ativação:* `{new_aid}`\n"
+            f"☎️ Número: `{new_phone}`\n"
+            f"☎️ Sem DDI: `{short}`",
+            parse_mode="Markdown"
+        )
+
+        status_map[new_aid] = {
+            'user_id': uid,
+            'price': price,
+            'chat_id': m.chat.id,
+            'message_id': None,
+            'service': SERVICE_NAMES['srv2'],
+            'service_key': 'srv2',
+            'full': new_phone,
+            'short': short,
+            'provider': 'sms24h',
+            'codes': []
+        }
+
+        spawn_sms_thread(new_aid)
+        return
+
+    # Erros da API:
+    bot.send_message(m.chat.id, f"❌ Não foi possível reativar.\nAPI: {txt}")
 
 def get_or_create_api_token(user_id):
     with get_db_conn() as conn, conn.cursor() as cur:
@@ -1148,6 +1214,9 @@ def send_menu(chat_id):
     kb = telebot.types.InlineKeyboardMarkup(row_width=1)
     kb.add(
         telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
+        telebot.types.InlineKeyboardButton('♻ Reativar número Servidor 2', callback_data='reativar_s2'),
+        telebot.types.InlineKeyboardButton('🔑 Token API', callback_data='menu_token'),
+        telebot.types.InlineKeyboardButton('🆔 Meu ID', callback_data='menu_id'),
         telebot.types.InlineKeyboardButton('💰 Saldo', callback_data='menu_saldo'),
         telebot.types.InlineKeyboardButton('🤑 Recarregar', callback_data='menu_recarregar'),
         telebot.types.InlineKeyboardButton('👥 Referências', callback_data='menu_refer'),
@@ -1156,11 +1225,25 @@ def send_menu(chat_id):
     )
     bot.send_message(chat_id, 'Escolha uma opção:', reply_markup=kb)
 
+
 @bot.callback_query_handler(lambda c: c.data == 'menu')
 def callback_menu(c):
     try: bot.answer_callback_query(c.id)
     except: pass
     send_menu(c.message.chat.id)
+@bot.callback_query_handler(lambda c: c.data == 'menu_token')
+def menu_token(c):
+    try: bot.answer_callback_query(c.id)
+    except: pass
+    tok = get_or_create_api_token(c.from_user.id)
+    bot.send_message(c.message.chat.id, f"🔑 *Seu Token API:*\n`{tok}`", parse_mode="Markdown")
+
+
+@bot.callback_query_handler(lambda c: c.data == 'menu_id')
+def menu_id(c):
+    try: bot.answer_callback_query(c.id)
+    except: pass
+    bot.send_message(c.message.chat.id, f"🆔 *Seu ID:* `{c.from_user.id}`", parse_mode="Markdown")
 
 def show_comprar_menu(chat_id):
     kb = telebot.types.InlineKeyboardMarkup(row_width=1)
@@ -1292,6 +1375,21 @@ def menu_refer(c):
         text += "\n" + "\n".join(nomes)
     bot.send_message(c.message.chat.id, text, parse_mode='Markdown')
     send_menu(c.message.chat.id)
+@bot.callback_query_handler(lambda c: c.data == 'reativar_s2')
+def reativar_s2(c):
+    try: bot.answer_callback_query(c.id)
+    except: pass
+
+    bot.send_message(
+        c.message.chat.id,
+        "♻ *Reativar número – Servidor 2*\n\n"
+        "Cole abaixo o *ID de ativação (AID)* do número anterior.\n\n"
+        "⚠ *Aviso:* a reativação NÃO é garantida.\n"
+        "Se funcionar, o valor será descontado automaticamente.",
+        parse_mode="Markdown"
+    )
+
+    PENDING_REACT[c.from_user.id] = True
 
 # =========================================================
 # ================ COMPRAR (com V2 + srv2) ================
@@ -1388,9 +1486,10 @@ def cb_comprar(c):
                 if not info: return
                 new_text = (
                     f"📦 {service}\n"
+                    f"🆔 *ID de ativação:* `{aid}`\n"
                     f"☎️ Número: `{full}`\n"
                     f"☎️ Sem DDI: `{short}`\n\n"
-                    f"🕘 Prazo: {rem} minutos\n\n"
+                    f"🕘 Prazo: {PRAZO_MINUTOS} minutos\n\n"
                     f"💡 Ativo por {PRAZO_MINUTOS} minutos; sem SMS, saldo devolvido automaticamente."
                 )
                 kb_sel = kb_blocked if minute < 2 else kb_unlocked

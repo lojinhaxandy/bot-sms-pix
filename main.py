@@ -231,68 +231,86 @@ SCANNER_ENABLED = True   # padrão ligado
 
 # ====== NOVO: preços dinâmicos editáveis no painel ======
 SERVICE_PRICES = {
-    'mercado':  0.75,
-    'mpsrv2':   0.90,
-    'china':    0.60,
-    'china2':   0.60,
-    'picpay':   0.65,
-    'picsrv2':  0.70,
-    'wa1':      6.50,
-    'wa2':      7.00,
-    'outros':   1.10,
-    'srv2':     0.77,
+    'mercado':   0.75,
+    'mpsrv2':    0.90,
+    'china':     0.60,
+    'china2':    0.60,
+    'china3':    0.60,  # novo: SMS para China 3 (srv2)
+    'picpay':    0.65,
+    'picsrv2':   0.70,
+    'wa1':       6.50,
+    'wa2':       7.00,
+    'outros':    1.10,
+    'srv2':      0.77,
     # sms24h:
-    'nubank':   0.90,
-    'c6':       0.45,
-    'neon':     0.39,
+    'nubank':    0.90,
+    'c6':        0.45,
+    'neon':      0.39,
+    'agibanksrv2': 0.48,  # novo
+    'app99srv2':   0.39,  # novo
+    'nextsrv2':    0.42,  # novo
     # Servidor 1 / SMSBower:
-    'c6srv1':   0.64,
-    'google':   0.90,
+    'c6srv1':    0.64,
+    'google':    0.90,
+    'agibank':   0.48,  # novo
+    'app99':     0.39,  # novo
     # Servidor 2 / sms24h:
     'googlesrv2': 0.90,
 }
 
 # >>> rótulos
 SERVICE_NAMES = {
-    'mercado': 'Mercado Pago SMS',
-    'mpsrv2':  'Mercado Pago SMS Servidor 2',
-    'china':   'SMS para China',
-    'china2':  'SMS para China 2',
-    'picpay':  'PicPay SMS',
-    'picsrv2': 'PicPay SMS Servidor 2',
-    'wa1':     'WhatsApp',
-    'wa2':     'WhatsApp Servidor 2',
-    'outros':  'Outros SMS',
-    'srv2':    'Outros SMS Servidor 2',
+    'mercado':    'Mercado Pago SMS',
+    'mpsrv2':     'Mercado Pago SMS Servidor 2',
+    'china':      'SMS para China',
+    'china2':     'SMS para China 2',
+    'china3':     'SMS para China 3',  # novo
+    'picpay':     'PicPay SMS',
+    'picsrv2':    'PicPay SMS Servidor 2',
+    'wa1':        'WhatsApp',
+    'wa2':        'WhatsApp Servidor 2',
+    'outros':     'Outros SMS',
+    'srv2':       'Outros SMS Servidor 2',
     # sms24h:
-    'nubank':  'Nubank SMS Servidor 2',
-    'c6':      'C6 Bank SMS Servidor 2',
-    'neon':    'Neon SMS Servidor 2',
+    'nubank':     'Nubank SMS Servidor 2',
+    'c6':         'C6 Bank SMS Servidor 2',
+    'neon':       'Neon SMS Servidor 2',
+    'agibanksrv2':'Agibank SMS Servidor 2',   # novo
+    'app99srv2':  '99app SMS Servidor 2',     # novo
+    'nextsrv2':   'Next SMS Servidor 2',      # novo
     # Servidor 1:
-    'c6srv1':  'C6 Bank SMS',
-    'google':  'Google SMS',
+    'c6srv1':     'C6 Bank SMS',
+    'google':     'Google SMS',
+    'agibank':    'Agibank SMS',             # novo
+    'app99':      '99app SMS',               # novo
     # Servidor 2:
     'googlesrv2': 'Google SMS Servidor 2',
 }
 
 # >>> emojis
 SERVICE_EMOJIS = {
-    'mercado': '📲',
-    'mpsrv2':  '🛰️',
-    'china':   '🇨🇳',
-    'china2':  '🇨🇳',
-    'picpay':  '💸',
-    'picsrv2': '🛰️',
-    'wa1':     '💬',
-    'wa2':     '🛰️',
-    'outros':  '📡',
-    'srv2':    '🛰️',
-    'nubank':  '🏦',
-    'c6':      '🏦',
-    'neon':    '🏦',
-    'c6srv1':  '🏦',
-    'google':  '🔍',
-    'googlesrv2': '🔍',
+    'mercado':     '📲',
+    'mpsrv2':      '🛰️',
+    'china':       '🇨🇳',
+    'china2':      '🇨🇳',
+    'china3':      '🇨🇳',   # novo
+    'picpay':      '💸',
+    'picsrv2':     '🛰️',
+    'wa1':         '💬',
+    'wa2':         '🛰️',
+    'outros':      '📡',
+    'srv2':        '🛰️',
+    'nubank':      '🏦',
+    'c6':          '🏦',
+    'neon':        '🏦',
+    'c6srv1':      '🏦',
+    'google':      '🔍',
+    'googlesrv2':  '🔍',
+    'agibank':     '🏦',    # novo
+    'agibanksrv2': '🏦',    # novo
+    'app99':       '🚕',    # novo
+    'app99srv2':   '🚕',    # novo
+    'nextsrv2':    '🏦',    # novo
 }
 
 # >>> CAP global editável para maxPrice no SMSBower
@@ -300,14 +318,16 @@ SMSBOWER_MAX_PRICE_CAP = 0.1754  # USD
 
 # >>> NOVO: CAPs por serviço (Servidor 1 / SMSBower) - EDITÁVEIS NO PAINEL
 DEFAULT_S1_CAPS = {
-    'mercado': 0.10,
-    'china':   0.10,
-    'china2':  0.10,
-    'picpay':  0.10,
-    'wa1':     0.70,  # WA segue regra especial, mas limitado por este cap
-    'outros':  0.20,
-    'c6srv1':  0.08,  # solicitado
-    'google':  0.11,  # solicitado
+    'mercado':  0.10,
+    'china':    0.10,
+    'china2':   0.10,
+    'picpay':   0.10,
+    'wa1':      0.70,  # WA segue regra especial, mas limitado por este cap
+    'outros':   0.20,
+    'c6srv1':   0.08,  # solicitado
+    'google':   0.11,  # solicitado
+    'agibank':  0.08,  # novo: Agibank S1
+    'app99':    0.07,  # novo: 99app S1
 }
 S1_CAPS = DEFAULT_S1_CAPS.copy()
 import secrets
@@ -596,32 +616,39 @@ def api_buy():
         return {"error": "saldo insuficiente", "saldo": saldo}, 402
 
     # identificar provider
-    idsms = {
-        'mercado': get_service_code('mercado'),
-        'mpsrv2':  'cq',
-        'china':   get_service_code('china'),
-        'china2':  get_service_code('china2'),
-        'picpay':  get_service_code('picpay'),
-        'picsrv2': 'ev',
-        'wa1':     'wa',
-        'wa2':     'wa',
-        'outros':  get_service_code('outros'),
-        'srv2':    'ot',
-        'nubank':  'aaa',
-        'c6':      'aff',
-        'neon':    'aex',
-        'c6srv1':  get_service_code('outros'),
-        'google':  'go',
-        'googlesrv2': 'go',
+            idsms = {
+        'mercado':     get_service_code('mercado'),
+        'mpsrv2':      'cq',
+        'china':       get_service_code('china'),
+        'china2':      get_service_code('china2'),
+        'china3':      'ot',      # novo: China 3 (srv2, sms24h)
+        'picpay':      get_service_code('picpay'),
+        'picsrv2':     'ev',
+        'wa1':         'wa',
+        'wa2':         'wa',
+        'outros':      get_service_code('outros'),
+        'srv2':        'ot',
+        'nubank':      'aaa',
+        'c6':          'aff',
+        'neon':        'aex',
+        'agibank':     'sa',      # novo: Agibank S1 (smsbower)
+        'agibanksrv2': 'sa',      # novo: Agibank S2 (sms24h)
+        'app99':       'ki',      # novo: 99app S1
+        'app99srv2':   'ki',      # novo: 99app S2
+        'nextsrv2':    'aey',     # novo: Next S2
+        'c6srv1':      get_service_code('outros'),
+        'google':      'go',
+        'googlesrv2':  'go',
     }
-
+    
     service_code = idsms.get(service)
 
     if not service_code:
         return {"error": "serviço sem configuração"}, 400
 
     # servidor SMS24H
-    if service in ('srv2', 'mpsrv2', 'picsrv2', 'wa2', 'nubank', 'c6', 'neon', 'googlesrv2'):
+        # servidor SMS24H
+    if service in ('srv2', 'mpsrv2', 'picsrv2', 'wa2', 'nubank', 'c6', 'neon', 'googlesrv2', 'agibanksrv2', 'app99srv2', 'nextsrv2', 'china3'):
         resp = solicitar_numero_sms24h(service_code)
         provider = 'sms24h'
         serviodr = 'servidor 2'
@@ -629,6 +656,7 @@ def api_buy():
         resp = solicitar_numero_smsbower(service_code)
         provider = 'smsbower'
         serviodr = 'servidor 1'
+
     if resp.get('status') != 'success':
         return {"error": "sem números disponíveis"}, 503
 
@@ -1260,6 +1288,7 @@ def show_comprar_menu(chat_id):
     add_btn('mpsrv2')
     add_btn('china')
     add_btn('china2')
+    add_btn('china3')   # novo: logo abaixo da China 2
     add_btn('picpay')
     add_btn('picsrv2')
     add_btn('wa1')
@@ -1269,11 +1298,16 @@ def show_comprar_menu(chat_id):
     add_btn('google')
     add_btn('googlesrv2')
 
-    # Novos (todos sms24h) + C6 (Srv1 via SMSBower) ACIMA do C6 Srv2
+    # Bancos / SMS especiais
     add_btn('nubank')
     add_btn('c6srv1')
     add_btn('c6')
     add_btn('neon')
+    add_btn('agibank')      # novo S1
+    add_btn('agibanksrv2')  # novo S2
+    add_btn('app99')        # novo S1
+    add_btn('app99srv2')    # novo S2
+    add_btn('nextsrv2')     # novo S2
 
     add_btn('outros')
     add_btn('srv2')
@@ -1405,26 +1439,32 @@ def cb_comprar(c):
     prices = SERVICE_PRICES
     names  = SERVICE_NAMES
 
-    idsms = {
-        'mercado': get_service_code('mercado'),  # smsbower
-        'mpsrv2':  'cq',                         # sms24h - Mercado
-        'china':   get_service_code('china'),    # smsbower
-        'china2':  get_service_code('china2'),   # smsbower
-        'picpay':  get_service_code('picpay'),   # smsbower
-        'picsrv2': 'ev',                         # sms24h - PicPay
-        'wa1':     'wa',                         # smsbower - WhatsApp
-        'wa2':     'wa',                         # sms24h  - WhatsApp
-        'outros':  get_service_code('outros'),   # smsbower
-        'srv2':    'ot',                         # sms24h - Outros
+        idsms = {
+        'mercado':     get_service_code('mercado'),  # smsbower
+        'mpsrv2':      'cq',                         # sms24h - Mercado
+        'china':       get_service_code('china'),    # smsbower
+        'china2':      get_service_code('china2'),   # smsbower
+        'china3':      'ot',                         # sms24h - China 3
+        'picpay':      get_service_code('picpay'),   # smsbower
+        'picsrv2':     'ev',                         # sms24h - PicPay
+        'wa1':         'wa',                         # smsbower - WhatsApp
+        'wa2':         'wa',                         # sms24h  - WhatsApp
+        'outros':      get_service_code('outros'),   # smsbower
+        'srv2':        'ot',                         # sms24h - Outros
         # sms24h:
-        'nubank':  'aaa',
-        'c6':      'aff',
-        'neon':    'aex',
+        'nubank':      'aaa',
+        'c6':          'aff',
+        'neon':        'aex',
+        'agibanksrv2': 'sa',                         # novo
+        'app99srv2':   'ki',                         # novo
+        'nextsrv2':    'aey',                        # novo
         # Servidor 1:
-        'c6srv1':  get_service_code('outros'),
-        'google':  'go',
+        'c6srv1':      get_service_code('outros'),
+        'google':      'go',
+        'agibank':     'sa',                         # novo
+        'app99':       'ki',                         # novo
         # Servidor 2:
-        'googlesrv2': 'go',
+        'googlesrv2':  'go',
     }
 
     balance = carregar_usuario(user_id)['saldo']
@@ -1438,7 +1478,7 @@ def cb_comprar(c):
         return bot.answer_callback_query(c.id, '❌ Saldo insuficiente.', True)
 
     # ============ fluxo sms24h (Servidor 2) ============
-    if key in ('srv2', 'mpsrv2', 'picsrv2', 'wa2', 'nubank', 'c6', 'neon', 'googlesrv2'):
+    if key in ('srv2', 'mpsrv2', 'picsrv2', 'wa2', 'nubank', 'c6', 'neon', 'googlesrv2', 'agibanksrv2', 'app99srv2', 'nextsrv2', 'china3'):
         resp = solicitar_numero_sms24h(idsms[key], operator="any", country=COUNTRY_ID)
         if resp.get('status') != 'success':
             return bot.send_message(c.message.chat.id, '🚫 Sem números disponíveis.')
@@ -1662,8 +1702,21 @@ def spawn_sms_thread(aid):
             payload = status.split(':', 1)[1] if ':' in status else status
             display = payload
 
-            if display not in info['codes']:
-                info['codes'].append(display)
+            codes_added = False
+
+            # Tratamento especial: SMS para China 3 → extrair só dígitos com 4+ caracteres
+            if service_key == 'china3':
+                nums = re.findall(r'\d+', payload)
+                for token in nums:
+                    if len(token) >= 4 and token not in info['codes']:
+                        info['codes'].append(token)
+                        codes_added = True
+            else:
+                if display not in info['codes']:
+                    info['codes'].append(display)
+                    codes_added = True
+
+            if codes_added:
                 registrar_sms_recebido(aid)
                 rt = datetime.now().strftime('%d/%m/%Y %H:%M:%S')
                 text = (
@@ -1692,7 +1745,9 @@ def spawn_sms_thread(aid):
                         raise
                 except Exception:
                     pass
+
             time.sleep(5)
+
     threading.Thread(target=check_sms, daemon=True).start()
 
 @bot.callback_query_handler(lambda c: c.data.startswith('retry_'))
@@ -2004,7 +2059,10 @@ def painel_admin():
            ('outros', SERVICE_NAMES['outros']),
            ('c6srv1', SERVICE_NAMES['c6srv1']),
            ('google', SERVICE_NAMES['google']),
+           ('agibank', SERVICE_NAMES['agibank']),   # novo
+           ('app99', SERVICE_NAMES['app99']),       # novo
        ])
+
 
 # =========================================================
 # =================== HEALTH / WEBHOOKS ===================

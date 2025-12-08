@@ -1439,7 +1439,7 @@ def cb_comprar(c):
     prices = SERVICE_PRICES
     names  = SERVICE_NAMES
 
-        idsms = {
+    idsms = {
         'mercado':     get_service_code('mercado'),  # smsbower
         'mpsrv2':      'cq',                         # sms24h - Mercado
         'china':       get_service_code('china'),    # smsbower

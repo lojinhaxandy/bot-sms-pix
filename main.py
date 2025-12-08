@@ -484,7 +484,7 @@ def exportar_backup_json():
             enviar_documento_bot(backup_bot, BACKUP_CHAT_ID, "usuarios_backup.json")
 
 # =========================================================
-# ============= api =================
+# ============= serviço api =================
 # =========================================================
 @bot.message_handler(commands=['token'])
 def cmd_token(m):
@@ -583,6 +583,7 @@ def api_buy():
         "provider": provider,
         "chat_id": None,  # Sem envio para Telegram
         "message_id": None
+        "is_api": True
     }
 
     spawn_sms_thread(aid)
@@ -744,11 +745,103 @@ def api_retry():
             "status": "retry_sent",
             "message": "Outro SMS foi solicitado com sucesso.",
             "aid": aid,
-            "provider": provider
         }
 
     except Exception as e:
         return {"error": "falha ao solicitar novo SMS", "details": str(e)}, 500
+@app.route('/api/balance', methods=['POST'])
+def api_balance():
+    data = request.json or {}
+    token = data.get("token")
+
+    if not token:
+        return {"error": "token é obrigatório"}, 400
+
+    with get_db_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT user_id FROM api_tokens WHERE token=%s", (token,))
+        row = cur.fetchone()
+
+    if not row:
+        return {"error": "token inválido"}, 401
+
+    user = carregar_usuario(row['user_id'])
+
+    return {
+        "user_id": row['user_id'],
+        "saldo": float(user['saldo'])
+    }
+@app.route('/api/wait', methods=['POST'])
+def api_wait():
+    data = request.json or {}
+
+    token = data.get("token")
+    aid   = data.get("aid")
+    timeout = int(data.get("timeout", 90))  # padrão: 90 segundos
+
+    if not token or not aid:
+        return {"error": "token e aid são obrigatórios"}, 400
+
+    # validar token
+    with get_db_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT user_id FROM api_tokens WHERE token=%s", (token,))
+        row = cur.fetchone()
+
+    if not row:
+        return {"error": "token inválido"}, 401
+
+    user_id = str(row['user_id'])
+
+    info = status_map.get(aid)
+    if not info:
+        return {"error": "aid inválido ou expirado"}, 404
+
+    if str(info['user_id']) != user_id:
+        return {"error": "este número não pertence ao usuário"}, 403
+
+    provider = info['provider']
+
+    # 1. Se já tem SMS, retorna imediatamente
+    if info.get("codes"):
+        return {
+            "status": "received",
+            "sms": info["codes"]
+        }
+
+    # 2. Loop de long polling
+    end_time = time.time() + timeout
+
+    while time.time() < end_time:
+        status_resp = obter_status(aid, provider)
+
+        # CANCELADO
+        if status_resp == "STATUS_CANCEL":
+            return {
+                "status": "canceled",
+                "sms": info.get("codes", [])
+            }
+
+        # RECEBEU SMS
+        if status_resp and ":" in status_resp:
+            code = status_resp.split(":", 1)[1]
+
+            if code not in info["codes"]:
+                info["codes"].append(code)
+                registrar_sms_recebido(aid)
+
+            return {
+                "status": "received",
+                "sms": info["codes"]
+            }
+
+        time.sleep(3)
+
+    # 3. Timeout atingido → retorna que está aguardando
+    return {
+        "status": "waiting",
+        "sms": info.get("codes", []),
+        "timeout": True
+    }
+
 # =========================================================
 # ============= SALDO / NÚMEROS (mantido) =================
 # =========================================================
@@ -1315,6 +1408,10 @@ def cb_comprar(c):
             if info and not info.get('codes') and not info.get('canceled_by_user'):
                 cancelar_numero(aid, provider='sms24h')
                 ok2 = marcar_cancelado_e_devolver(info['user_id'], aid)
+                if info.get("is_api"):
+                    # salvar log opcional
+                    logger.info(f"[API] Cancelamento automático devolveu saldo para {info['user_id']} (AID: {aid})")
+                    return
                 if ok2:
                     try: bot.delete_message(info['chat_id'], info['message_id'])
                     except: pass
@@ -1411,6 +1508,10 @@ def cb_comprar(c):
         if info and not info.get('codes') and not info.get('canceled_by_user'):
             cancelar_numero(aid, provider='smsbower')
             ok2 = marcar_cancelado_e_devolver(info['user_id'], aid)
+            if info.get("is_api"):
+                # salvar log opcional
+                logger.info(f"[API] Cancelamento automático devolveu saldo para {info['user_id']} (AID: {aid})")
+                return
             if ok2:
                 try: bot.delete_message(info['chat_id'], info['message_id'])
                 except: pass
@@ -1449,6 +1550,9 @@ def spawn_sms_thread(aid):
             if status == 'STATUS_CANCEL':
                 if not info['codes']:
                     ok = marcar_cancelado_e_devolver(info['user_id'], aid)
+                    if info.get("is_api"):
+                        logger.info(f"[API] STATUS_CANCEL devolveu saldo: AID {aid}")
+                        return
                     if ok:
                         bot.send_message(chat_id, f"❌ Cancelado pelo provider. R${info['price']:.2f} devolvido.")
                 return

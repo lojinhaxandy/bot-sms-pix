@@ -554,10 +554,10 @@ def api_buy():
     # servidor SMS24H
     if service in ('srv2', 'mpsrv2', 'picsrv2', 'wa2', 'nubank', 'c6', 'neon', 'googlesrv2'):
         resp = solicitar_numero_sms24h(service_code)
-        provider = 'sms24h'
+        provider = 'Servidor 2'
     else:
         resp = solicitar_numero_smsbower(service_code)
-        provider = 'smsbower'
+        provider = 'Servidor 1'
 
     if resp.get('status') != 'success':
         return {"error": "sem números disponíveis"}, 503
@@ -595,6 +595,100 @@ def api_buy():
         "saldo_restante": float(carregar_usuario(user_id)['saldo']),
         "provider": provider
     }, 200
+
+@app.route('/api/status', methods=['POST'])
+def api_status():
+    data = request.json or {}
+
+    token = data.get("token")
+    aid   = data.get("aid")
+
+    if not token or not aid:
+        return {"error": "token e aid são obrigatórios"}, 400
+
+    # validar token
+    with get_db_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT user_id FROM api_tokens WHERE token=%s", (token,))
+        row = cur.fetchone()
+
+    if not row:
+        return {"error": "token inválido"}, 401
+
+    user_id = row['user_id']
+
+    info = status_map.get(aid)
+
+    if not info:
+        return {"error": "aid inválido ou expirado"}, 404
+
+    if str(info['user_id']) != str(user_id):
+        return {"error": "este número não pertence ao usuário"}, 403
+
+    status_resp = obter_status(aid, info['provider'])
+
+    # nada ainda?
+    if not status_resp or status_resp.startswith("STATUS_WAIT"):
+        return {
+            "status": "waiting",
+            "sms": info.get("codes", [])
+        }
+
+    # cancelado pelo provider
+    if status_resp == "STATUS_CANCEL":
+        return {
+            "status": "canceled",
+            "sms": info.get("codes", [])
+        }
+
+    # recebeu SMS
+    if "STATUS_OK" in status_resp or ":" in status_resp:
+        code = status_resp.split(":", 1)[1]
+        if code not in info['codes']:
+            info['codes'].append(code)
+            registrar_sms_recebido(aid)
+
+        return {
+            "status": "received",
+            "sms": info['codes']
+        }
+
+    return {"status": "unknown", "raw": status_resp}
+
+@app.route('/api/cancel', methods=['POST'])
+def api_cancel():
+    data = request.json or {}
+
+    token = data.get("token")
+    aid   = data.get("aid")
+
+    if not token or not aid:
+        return {"error": "token e aid são obrigatórios"}, 400
+
+    # validar token
+    with get_db_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT user_id FROM api_tokens WHERE token=%s", (token,))
+        row = cur.fetchone()
+
+    if not row:
+        return {"error": "token inválido"}, 401
+
+    user_id = row['user_id']
+    info = status_map.get(aid)
+
+    if not info:
+        return {"error": "aid inválido ou expirado"}, 404
+
+    if str(info['user_id']) != str(user_id):
+        return {"error": "este número não pertence ao usuário"}, 403
+
+    if info.get("codes"):
+        return {"error": "não pode cancelar após receber SMS"}, 403
+
+    info['canceled_by_user'] = True
+    cancelar_numero(aid, info['provider'])
+    marcar_cancelado_e_devolver(user_id, aid)
+
+    return {"status": "canceled", "saldo": carregar_usuario(user_id)['saldo']}
 
 def comprar_numero_atomico(uid, aid, price):
     with get_db_conn() as conn:

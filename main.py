@@ -554,10 +554,10 @@ def api_buy():
     # servidor SMS24H
     if service in ('srv2', 'mpsrv2', 'picsrv2', 'wa2', 'nubank', 'c6', 'neon', 'googlesrv2'):
         resp = solicitar_numero_sms24h(service_code)
-        provider = 'Servidor 2'
+        provider = 'sms24h'
     else:
         resp = solicitar_numero_smsbower(service_code)
-        provider = 'Servidor 1'
+        provider = 'smsbower'
 
     if resp.get('status') != 'success':
         return {"error": "sem números disponíveis"}, 503
@@ -579,7 +579,6 @@ def api_buy():
         "service_key": service,
         "full": full,
         "short": short,
-        "provider": provider,
         "chat_id": None,  # Sem envio para Telegram
         "message_id": None
     }

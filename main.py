@@ -555,10 +555,11 @@ def api_buy():
     if service in ('srv2', 'mpsrv2', 'picsrv2', 'wa2', 'nubank', 'c6', 'neon', 'googlesrv2'):
         resp = solicitar_numero_sms24h(service_code)
         provider = 'sms24h'
+        serviodr = 'servidor 2'
     else:
         resp = solicitar_numero_smsbower(service_code)
         provider = 'smsbower'
-
+        serviodr = 'servidor 1'
     if resp.get('status') != 'success':
         return {"error": "sem números disponíveis"}, 503
 
@@ -579,6 +580,7 @@ def api_buy():
         "service_key": service,
         "full": full,
         "short": short,
+        "provider": provider,
         "chat_id": None,  # Sem envio para Telegram
         "message_id": None
     }
@@ -592,7 +594,7 @@ def api_buy():
         "short": short,
         "price": price,
         "saldo_restante": float(carregar_usuario(user_id)['saldo']),
-        "provider": provider
+        "provider": serviodr
     }, 200
 
 @app.route('/api/status', methods=['POST'])

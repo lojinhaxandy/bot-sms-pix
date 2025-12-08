@@ -1705,7 +1705,7 @@ def cb_comprar(c):
             f"🆔 *ID de ativação:* `{aid}`\n"
             f"☎️ Número: `{full}`\n"
             f"☎️ Sem DDI: `{short}`\n\n"
-            f"🕘 Prazo: {rem} minutos\n\n"
+            f"🕘 Prazo: {PRAZO_MINUTOS} minutos\n\n"
             f"💡 Ativo por {PRAZO_MINUTOS} minutos; sem SMS, saldo devolvido automaticamente."
         )
         msg = bot.send_message(c.message.chat.id, text, parse_mode='Markdown', reply_markup=kb_blocked)
@@ -1814,7 +1814,7 @@ def cb_comprar(c):
         f"📦 {service}\n"
         f"☎️ Número: `{full}`\n"
         f"☎️ Sem DDI: `{short}`\n\n"
-        f"🕘 Prazo: {rem} minutos\n\n"
+        f"🕘 Prazo: {PRAZO_MINUTOS} minutos\n\n"
         f"💡 Ativo por {PRAZO_MINUTOS} minutos; sem SMS, saldo devolvido automaticamente."
     )
     msg = bot.send_message(c.message.chat.id, text, parse_mode='Markdown', reply_markup=kb_blocked)

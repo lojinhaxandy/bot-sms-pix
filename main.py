@@ -484,7 +484,7 @@ def exportar_backup_json():
             enviar_documento_bot(backup_bot, BACKUP_CHAT_ID, "usuarios_backup.json")
 
 # =========================================================
-# ============= SALDO / NÚMEROS (mantido) =================
+# ============= api =================
 # =========================================================
 @bot.message_handler(commands=['token'])
 def cmd_token(m):
@@ -690,7 +690,68 @@ def api_cancel():
     marcar_cancelado_e_devolver(user_id, aid)
 
     return {"status": "canceled", "saldo": carregar_usuario(user_id)['saldo']}
+@app.route('/api/retry', methods=['POST'])
+def api_retry():
+    data = request.json or {}
 
+    token = data.get("token")
+    aid   = data.get("aid")
+
+    if not token or not aid:
+        return {"error": "token e aid são obrigatórios"}, 400
+
+    # validar token
+    with get_db_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT user_id FROM api_tokens WHERE token=%s", (token,))
+        row = cur.fetchone()
+
+    if not row:
+        return {"error": "token inválido"}, 401
+
+    user_id = str(row['user_id'])
+
+    info = status_map.get(aid)
+
+    if not info:
+        return {"error": "aid inválido ou expirado"}, 404
+
+    if str(info['user_id']) != user_id:
+        return {"error": "este número não pertence ao usuário"}, 403
+
+    provider = info.get("provider", "smsbower")
+
+    # - Se já recebeu SMS, permite pedir outro (igual ao Telegram)
+    # - Se não recebeu ainda, também permite
+    try:
+        if provider == "smsbower":
+            requests.get(
+                SMSBOWER_URL,
+                params={
+                    'api_key': API_KEY_SMSBOWER,
+                    'action': 'setStatus',
+                    'status': '3',
+                    'id': aid
+                },
+                timeout=10
+            )
+        else:
+            set_status_sms24h(aid, 3)
+
+        # reinicia o monitor de SMS
+        spawn_sms_thread(aid)
+
+        return {
+            "status": "retry_sent",
+            "message": "Outro SMS foi solicitado com sucesso.",
+            "aid": aid,
+            "provider": provider
+        }
+
+    except Exception as e:
+        return {"error": "falha ao solicitar novo SMS", "details": str(e)}, 500
+# =========================================================
+# ============= SALDO / NÚMEROS (mantido) =================
+# =========================================================
 def comprar_numero_atomico(uid, aid, price):
     with get_db_conn() as conn:
         with conn.cursor() as cur:

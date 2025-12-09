@@ -648,12 +648,32 @@ def api_buy():
 
     # servidor SMS24H
         # servidor SMS24H
-    if service in ('srv2', 'mpsrv2', 'picsrv2', 'wa2', 'nubank', 'c6', 'neon', 'googlesrv2', 'agibanksrv2', 'app99srv2', 'nextsrv2', 'china3'):
+    # servidor SMS24H
+    if service in ('srv2','mpsrv2','picsrv2','wa2','nubank','c6','neon','googlesrv2','agibanksrv2','app99srv2','nextsrv2','china3'):
         resp = solicitar_numero_sms24h(service_code)
         provider = 'sms24h'
         serviodr = 'servidor 2'
+
     else:
-        resp = solicitar_numero_smsbower(service_code)
+        # smsbower respeitando limite USD
+        s1_effective_cap = min(
+            float(SMSBOWER_MAX_PRICE_CAP),
+            float(S1_CAPS.get(service, 0.10))
+        )
+
+        if service == 'wa1':
+            base_max_price = obter_preco_wa_desc_v2(service_code, COUNTRY_ID, max_usd=s1_effective_cap)
+        elif service == 'china2':
+            with SCANNER_PRICE_LOCK:
+                mp = SCANNER_LAST_PRICE
+            base_max_price = float(mp) if mp is not None else obter_menor_preco_v2(service_code, COUNTRY_ID)
+        else:
+            base_max_price = obter_menor_preco_v2(service_code, COUNTRY_ID)
+
+        if (base_max_price is None) or (float(base_max_price) > s1_effective_cap):
+            return {"error":"sem números disponíveis"}, 503
+
+        resp = solicitar_numero_smsbower(service_code, max_price=float(base_max_price))
         provider = 'smsbower'
         serviodr = 'servidor 1'
 
@@ -1556,7 +1576,7 @@ def handle_recharge_amount(m):
         },
         "auto_return": "approved"
     })
-    pay_url = pref["response"]["init_point"]
+    pay_url = pref["response"]["init_point"] + "&source=browser"
     kb = telebot.types.InlineKeyboardMarkup()
     kb.row(telebot.types.InlineKeyboardButton(f"💳 Pagar R$ {amount:.2f}", url=pay_url))
     kb.row(

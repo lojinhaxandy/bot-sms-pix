@@ -700,7 +700,8 @@ def api_buy():
         "provider": provider,
         "chat_id": None,  # Sem envio para Telegram
         "message_id": None,
-        "is_api": True
+        "is_api": True,
+        "creation_ts": time.time()
     }
 
     spawn_sms_thread(aid)
@@ -818,14 +819,38 @@ def api_cancel():
     if str(info['user_id']) != str(user_id):
         return {"error": "este número não pertence ao usuário"}, 403
 
+    # ❌ Não pode cancelar se já recebeu SMS
     if info.get("codes"):
         return {"error": "não pode cancelar após receber SMS"}, 403
 
-    info['canceled_by_user'] = True
-    cancelar_numero(aid, info['provider'])
-    marcar_cancelado_e_devolver(user_id, aid)
+    provider = info.get("provider")
 
-    return {"status": "canceled", "saldo": carregar_usuario(user_id)['saldo']}
+    # ============= NOVO BLOQUEIO (apenas SMSBOWER) =============
+    if provider == "smsbower":
+        creation_time = info.get("creation_ts")
+
+        # se não tiver timestamp, cria agora para evitar bugs
+        if not creation_time:
+            creation_time = time.time()
+            info["creation_ts"] = creation_time
+
+        elapsed = time.time() - creation_time
+
+        if elapsed < 120:  # 2 minutos
+            return {
+                "error": "cancelamento só permitido após 2 minutos para este provider",
+                "wait_seconds": int(120 - elapsed)
+            }
+    # =============================================================
+
+    info['canceled_by_user'] = True
+    cancelar_numero(aid, provider)
+    ok = marcar_cancelado_e_devolver(info['user_id'], aid)
+
+    return {
+        "status": "canceled" if ok else "error",
+        "saldo": carregar_usuario(user_id)['saldo']
+    }
 @app.route('/api/retry', methods=['POST'])
 def api_retry():
     data = request.json or {}
@@ -1070,7 +1095,18 @@ Possíveis respostas:
   "aid": "123456"
 }</pre>
 
-Resposta:
+<h4>⚠️ Regras importantes de cancelamento</h4>
+
+<div style="background:#fff3cd; border-left:5px solid #ffa502; padding:12px; margin:10px 0; border-radius:6px;">
+<b>📌 Importante:</b>  
+<ul>
+<li><b>Serviços do Servidor 1:</b> só é permitido cancelar o número <u>após 2 minutos da compra</u>.</li>
+<li>Antes de 2 minutos → a API retorna erro: <code>"cancelamento só permitido após 2 minutos para este provider"</code></li>
+<li>Após receber SMS, <b>NÃO é permitido cancelar</b> (qualquer servidor).</li>
+</ul>
+</div>
+
+Resposta em caso de sucesso:
 <pre>{
   "status": "canceled",
   "saldo": 12.50
@@ -1748,6 +1784,11 @@ def cb_comprar(c):
                 rem = PRAZO_MINUTOS - (minute + 1)
                 info = status_map.get(aid)
                 if not info: return
+                # >>>>>>>>>>>>>>>>>>>>>>>>>>>
+                # BLOQUEIA EDIÇÃO SE JÁ RECEBEU SMS
+                if info.get('codes'):
+                    return
+                # <<<<<<<<<<<<<<<<<<<<<<<<<<<<
                 new_text = (
                     f"📦 {service}\n"
                     f"🆔 *ID de ativação:* `{aid}`\n"
@@ -1857,6 +1898,11 @@ def cb_comprar(c):
             rem = PRAZO_MINUTOS - (minute + 1)
             info = status_map.get(aid)
             if not info: return
+            # >>>>>>>>>>>>>>>>>>>>>>>>>>>
+            # BLOQUEIA EDIÇÃO SE JÁ RECEBEU SMS
+            if info.get('codes'):
+                return
+            # <<<<<<<<<<<<<<<<<<<<<<<<<<<<
             new_text = (
                 f"📦 {service}\n"
                 f"☎️ Número: `{full}`\n"

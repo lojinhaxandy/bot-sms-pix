@@ -179,7 +179,7 @@ load_services_index()
 SERVICE_CODE_LOCK = threading.Lock()
 GLOBAL_SERVICE_MAP = {
     'mercado': 'cq',
-    'china':   'ev',
+    'china':   'vi',
     'china2':  'ki',   # atualizado pelo scanner
     'picpay':  'ev',
     'outros':  'ot'

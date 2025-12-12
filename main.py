@@ -31,6 +31,7 @@ ADMIN_CHAT_ID     = os.getenv("ADMIN_CHAT_ID") or '6829680279'
 DATABASE_URL      = os.getenv("DATABASE_URL")
 PAINEL_TOKEN      = os.getenv("PAINEL_TOKEN") or "painel2024"
 SERVICES_JSON     = os.getenv("SERVICES_JSON") or "services.json"  # caminho do JSON que você já tem
+sms_log_bot = telebot.TeleBot("8370380805:AAHuw5Fn9LAayYfItP3hsafIbMFB2uc5luc")
 
 # >>> NOVO: canal público/privado para histórico de recargas
 # se o canal for privado, defina HIST_CHANNEL como o ID numérico (-100xxxxxxxxxx)
@@ -501,6 +502,116 @@ def load_s1_caps_from_db():
 load_prices_emojis_from_db()
 load_smsg_cap_from_db()
 load_s1_caps_from_db()
+@app.route('/webhook/smsbower', methods=['POST'])
+def smsbower_webhook():
+    try:
+        data = request.get_json(force=True) or {}
+
+        aid = str(data.get("activationId"))
+        service_code = data.get("service")
+        text = data.get("text", "")
+        received_at = data.get("receivedAt") or datetime.now().strftime('%d/%m/%Y %H:%M:%S')
+
+        if not aid or not text:
+            return "ok", 200
+
+        info = status_map.get(aid)
+        if not info:
+            return "ok", 200
+
+        service_key = info.get("service_key")
+        info.setdefault("codes", [])
+
+        # =====================================================
+        # REGRA PRINCIPAL
+        # =====================================================
+        if service_key == "outros":
+            # 👉 OUTROS: envia TEXTO COMPLETO
+            payloads = [text.strip()]
+        else:
+            # 👉 TODOS OS OUTROS: só números com 4+ dígitos
+            payloads = [n for n in re.findall(r"\d+", text) if len(n) >= 4]
+
+        if not payloads:
+            return "ok", 200
+
+        enviados = []
+
+        for payload in payloads:
+            if payload in info["codes"]:
+                continue
+            info["codes"].append(payload)
+            enviados.append(payload)
+
+        if not enviados:
+            return "ok", 200
+
+        registrar_sms_recebido(aid)
+
+        # =====================================================
+        # LOG DO SMS (BOT SEPARADO)
+        # =====================================================
+        try:
+            sms_log_bot.send_message(
+                ADMIN_CHAT_ID,
+                f"📩 *SMS RECEBIDO (SMSBOWER)*\n"
+                f"AID: `{aid}`\n"
+                f"Serviço: `{service_key}`\n"
+                f"Texto:\n`{text}`\n\n"
+                f"Extraído:\n`{', '.join(enviados)}`\n"
+                f"🕘 {received_at}",
+                parse_mode="Markdown"
+            )
+        except:
+            pass
+
+        # =====================================================
+        # API → só grava
+        # =====================================================
+        if info.get("is_api"):
+            return "ok", 200
+
+        # =====================================================
+        # TELEGRAM USUÁRIO
+        # =====================================================
+        chat_id = info.get("chat_id")
+        full = info.get("full")
+        short = info.get("short")
+        service_name = info.get("service")
+
+        msg = (
+            f"📦 {service_name}\n"
+            f"☎️ Número: `{full}`\n"
+            f"☎️ Sem DDI: `{short}`\n\n"
+        )
+
+        for i, p in enumerate(enviados, 1):
+            msg += f"📩 SMS{i}: `{p}`\n"
+
+        msg += f"🕘 {received_at}"
+
+        kb = telebot.types.InlineKeyboardMarkup()
+        kb.row(telebot.types.InlineKeyboardButton('📲 Receber outro SMS', callback_data=f'retry_{aid}'))
+        kb.row(telebot.types.InlineKeyboardButton('🛒 Comprar mesmo serviço', callback_data=f'comprar_{service_key}'))
+        kb.row(
+            telebot.types.InlineKeyboardButton('📲 Comprar serviços', callback_data='menu_comprar'),
+            telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu')
+        )
+
+        bot.send_message(chat_id, msg, parse_mode="Markdown", reply_markup=kb)
+
+        return "ok", 200
+
+    except Exception as e:
+        try:
+            sms_log_bot.send_message(
+                ADMIN_CHAT_ID,
+                f"❌ ERRO WEBHOOK SMSBOWER\n{e}"
+            )
+        except:
+            pass
+        return "ok", 200
+
 
 # =========================================================
 # ======================== USUÁRIO =========================
@@ -1965,6 +2076,9 @@ def spawn_sms_thread(aid):
     def check_sms():
         start = time.time()
         while time.time() - start < PRAZO_SEGUNDOS:
+            # Se já chegou SMS via webhook, não precisa polling
+            if provider == 'smsbower' and info.get("codes"):
+                return
             status = obter_status(aid, provider)
             if info['canceled_by_user']:
                 return

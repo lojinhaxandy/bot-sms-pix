@@ -882,36 +882,23 @@ def api_status():
         }
 
     # recebeu SMS
-    if "STATUS_OK" in status_resp or ":" in status_resp:
-        raw = status_resp.split(":", 1)[1]
+    raw = status_resp.split(":", 1)[1]
 
-    # --- FILTRO ESPECIAL SOMENTE PARA CHINA 3 ---
-    if info.get("service_key") == "china3":
-        nums = re.findall(r"\d+", raw)
-        clean_codes = []
-        for n in nums:
-            if len(n) >= 4:
-                if n not in info["codes"]:
-                    info["codes"].append(n)
-                clean_codes.append(n)
+    # 🔒 REGRA ÚNICA PARA API (igual webhook)
+    if info.get("service_key") == "outros":
+        payloads = [raw.strip()]
+    else:
+        payloads = [n for n in re.findall(r"\d+", raw) if len(n) >= 4]
 
-        registrar_sms_recebido(aid)
-        return {
-            "status": "received",
-            "sms": clean_codes   # <- só códigos puros
-        }
-
-    # --- OUTROS SERVIÇOS NORMAL ---
-    if raw not in info['codes']:
-        info['codes'].append(raw)
-        registrar_sms_recebido(aid)
+    for p in payloads:
+        if p not in info["codes"]:
+            info["codes"].append(p)
+            registrar_sms_recebido(aid)
 
     return {
         "status": "received",
-        "sms": info['codes']
+        "sms": payloads
     }
-
-    return {"status": "unknown", "raw": status_resp}
 
 @app.route('/api/cancel', methods=['POST'])
 def api_cancel():
@@ -1103,15 +1090,20 @@ def api_wait():
 
         # RECEBEU SMS
         if status_resp and ":" in status_resp:
-            code = status_resp.split(":", 1)[1]
+            raw = status_resp.split(":", 1)[1]
+            if info.get("service_key") == "outros":
+                payloads = [raw.strip()]
+            else:
+                payloads = [n for n in re.findall(r"\d+", raw) if len(n) >= 4]
 
-            if code not in info["codes"]:
-                info["codes"].append(code)
-                registrar_sms_recebido(aid)
+            for p in payloads:
+                if p not in info["codes"]:
+                    info["codes"].append(p)
+                    registrar_sms_recebido(aid)
 
             return {
                 "status": "received",
-                "sms": info["codes"]
+                "sms": payloads
             }
 
         time.sleep(3)
@@ -2111,15 +2103,15 @@ def spawn_sms_thread(aid):
             codes_added = False
 
             # Tratamento especial: SMS para China 3 → extrair só dígitos com 4+ caracteres
-            if service_key == 'china3':
-                nums = re.findall(r'\d+', payload)
-                for token in nums:
-                    if len(token) >= 4 and token not in info['codes']:
-                        info['codes'].append(token)
-                        codes_added = True
+            if service_key == "outros":
+                payloads = [payload.strip()]
             else:
-                if display not in info['codes']:
-                    info['codes'].append(display)
+                payloads = [n for n in re.findall(r"\d+", payload) if len(n) >= 4]
+
+            codes_added = False
+            for p in payloads:
+                if p not in info['codes']:
+                    info['codes'].append(p)
                     codes_added = True
 
             if codes_added:

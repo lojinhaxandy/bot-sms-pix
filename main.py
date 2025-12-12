@@ -822,7 +822,8 @@ def api_buy():
         "chat_id": None,  # Sem envio para Telegram
         "message_id": None,
         "is_api": True,
-        "creation_ts": time.time()
+        "creation_ts": time.time(),
+        "codes": []   # ✅ FUNDAMENTAL
     }
 
     spawn_sms_thread(aid)
@@ -843,7 +844,7 @@ def api_status():
 
     token = data.get("token")
     aid   = data.get("aid")
-
+    
     if not token or not aid:
         return {"error": "token e aid são obrigatórios"}, 400
 
@@ -861,7 +862,7 @@ def api_status():
 
     if not info:
         return {"error": "aid inválido ou expirado"}, 404
-
+    info.setdefault("codes", [])
     if str(info['user_id']) != str(user_id):
         return {"error": "este número não pertence ao usuário"}, 403
 
@@ -1060,9 +1061,10 @@ def api_wait():
     user_id = str(row['user_id'])
 
     info = status_map.get(aid)
+    
     if not info:
         return {"error": "aid inválido ou expirado"}, 404
-
+    info.setdefault("codes", [])
     if str(info['user_id']) != user_id:
         return {"error": "este número não pertence ao usuário"}, 403
 

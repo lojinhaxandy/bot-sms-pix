@@ -1117,12 +1117,14 @@ def api_wait():
         "sms": info.get("codes", []),
         "timeout": True
     }
-@app.route('/api-docs')
 def api_last_code(info):
     codes = info.get("codes") or []
     if not codes:
         return []
     return [codes[-1]]
+@app.route('/api-docs', methods=['GET'])
+def api_docs():
+    return public_api_docs()
 
 def public_api_docs():
     return render_template_string("""

@@ -898,8 +898,9 @@ def api_status():
 
     return {
         "status": "received",
-        "sms": payloads
+        "sms": api_last_code(info)
     }
+
 
 @app.route('/api/cancel', methods=['POST'])
 def api_cancel():
@@ -1117,6 +1118,12 @@ def api_wait():
         "timeout": True
     }
 @app.route('/api-docs')
+def api_last_code(info):
+    codes = info.get("codes") or []
+    if not codes:
+        return []
+    return [codes[-1]]
+
 def public_api_docs():
     return render_template_string("""
     <html>

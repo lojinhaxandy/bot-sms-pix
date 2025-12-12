@@ -585,7 +585,7 @@ def smsbower_webhook():
             f"☎️ Sem DDI: `{short}`\n\n"
         )
 
-        for i, p in enumerate(enviados, 1):
+        for i, p in enumerate(info["codes"], 1):
             msg += f"📩 SMS{i}: `{p}`\n"
 
         msg += f"🕘 {received_at}"

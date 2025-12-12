@@ -598,7 +598,17 @@ def smsbower_webhook():
             telebot.types.InlineKeyboardButton('📜 Menu', callback_data='menu')
         )
 
-        bot.send_message(chat_id, msg, parse_mode="Markdown", reply_markup=kb)
+        if info.get("sms_message_id"):
+            bot.edit_message_text(
+                msg,
+                chat_id,
+                info["sms_message_id"],
+                parse_mode="Markdown",
+                reply_markup=kb
+            )
+        else:
+            m = bot.send_message(chat_id, msg, parse_mode="Markdown", reply_markup=kb)
+            info["sms_message_id"] = m.message_id
 
         return "ok", 200
 
